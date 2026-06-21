@@ -1,0 +1,65 @@
+import type { AdminChannel, AdminServer, AdminUser, Channel, Invite, Member, Message, Server, User } from "@/types/domain";
+
+const configuredURL = process.env.NEXT_PUBLIC_API_URL;
+const API_URL =
+  configuredURL ??
+  (typeof window === "undefined"
+    ? "http://localhost:8080"
+    : `${window.location.protocol}//${window.location.hostname}:8080`);
+
+type AuthResponse = {
+  token: string;
+  user: User;
+};
+
+async function request<T>(path: string, token?: string | null, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...init.headers
+    }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error ?? "Request failed");
+  }
+  return data as T;
+}
+
+async function requestList<T>(path: string, token: string): Promise<T[]> {
+  const data = await request<T[] | null>(path, token);
+  return Array.isArray(data) ? data : [];
+}
+
+export const api = {
+  url: API_URL,
+  register: (body: { username: string; email: string; password: string }) =>
+    request<AuthResponse>("/api/auth/register", null, { method: "POST", body: JSON.stringify(body) }),
+  login: (body: { login: string; password: string }) =>
+    request<AuthResponse>("/api/auth/login", null, { method: "POST", body: JSON.stringify(body) }),
+  me: (token: string) => request<User>("/api/me", token),
+  changePassword: (token: string, body: { currentPassword: string; nextPassword: string }) =>
+    request<{ status: string }>("/api/me/password", token, { method: "POST", body: JSON.stringify(body) }),
+  servers: (token: string) => requestList<Server>("/api/servers", token),
+  createServer: (token: string, body: { name: string; description: string; iconText: string }) =>
+    request<{ server: Server; channels: Channel[] }>("/api/servers", token, { method: "POST", body: JSON.stringify(body) }),
+  invite: (token: string, serverId: string) => request<Invite>(`/api/servers/${serverId}/invite`, token),
+  joinInvite: (token: string, code: string) =>
+    request<Server>("/api/invites/join", token, { method: "POST", body: JSON.stringify({ code }) }),
+  channels: (token: string, serverId: string) => requestList<Channel>(`/api/servers/${serverId}/channels`, token),
+  createChannel: (token: string, serverId: string, body: { name: string; kind: "text" | "voice" }) =>
+    request<Channel>(`/api/servers/${serverId}/channels`, token, { method: "POST", body: JSON.stringify(body) }),
+  members: (token: string, serverId: string) => requestList<Member>(`/api/servers/${serverId}/members`, token),
+  removeMember: (token: string, serverId: string, memberId: string) =>
+    request<{ status: string }>(`/api/servers/${serverId}/members/${memberId}`, token, { method: "DELETE" }),
+  messages: (token: string, channelId: string) => requestList<Message>(`/api/channels/${channelId}/messages?limit=80`, token),
+  sendMessage: (token: string, channelId: string, content: string) =>
+    request<Message>(`/api/channels/${channelId}/messages`, token, { method: "POST", body: JSON.stringify({ content }) }),
+  adminUsers: (token: string) => requestList<AdminUser>("/api/admin/users", token),
+  adminServers: (token: string) => requestList<AdminServer>("/api/admin/servers", token),
+  adminChannels: (token: string) => requestList<AdminChannel>("/api/admin/channels", token),
+  deleteAdminChannel: (token: string, channelId: string) =>
+    request<{ status: string }>(`/api/admin/channels/${channelId}`, token, { method: "DELETE" })
+};

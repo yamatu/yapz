@@ -1,0 +1,850 @@
+"use client";
+
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Copy,
+  Gamepad2,
+  Hash,
+  Headphones,
+  KeyRound,
+  Loader2,
+  LogOut,
+  Mic,
+  MicOff,
+  Plus,
+  Send,
+  Settings,
+  Shield,
+  Trash2,
+  UserCog,
+  UserMinus,
+  Volume2
+} from "lucide-react";
+
+import { Badge, Button, Card, Input, Label } from "@/components/ui";
+import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
+import type { AdminChannel, AdminServer, AdminUser, Channel, Member, Message, Server, User } from "@/types/domain";
+
+type AuthMode = "login" | "register";
+type View = "chat" | "settings" | "admin";
+
+export default function Home() {
+  const [token, setToken] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [servers, setServers] = useState<Server[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [activeServerId, setActiveServerId] = useState<string | null>(null);
+  const [activeChannelId, setActiveChannelId] = useState<string | null>(null);
+  const [voiceChannelId, setVoiceChannelId] = useState<string | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [status, setStatus] = useState("未连接");
+  const [view, setView] = useState<View>("chat");
+  const [authReady, setAuthReady] = useState(false);
+  const [voiceMembers, setVoiceMembers] = useState<Record<string, string>>({});
+  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const [remoteVolumes, setRemoteVolumes] = useState<Record<string, number>>({});
+  const [remoteLevels, setRemoteLevels] = useState<Record<string, number>>({});
+  const [localLevel, setLocalLevel] = useState(0);
+  const [inputGain, setInputGain] = useState(1);
+  const [outputGain, setOutputGain] = useState(1);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const processedLocalStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const micGainRef = useRef<GainNode | null>(null);
+  const peersRef = useRef<Record<string, RTCPeerConnection>>({});
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const loadServers = useCallback(async () => {
+    if (!token) return;
+    const data = await api.servers(token);
+    setServers(data);
+    if (!activeServerId && data[0]) setActiveServerId(data[0].id);
+    if (activeServerId && !data.some((server) => server.id === activeServerId)) {
+      setActiveServerId(data[0]?.id ?? null);
+    }
+  }, [activeServerId, token]);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("yapz_token");
+    if (saved) setToken(saved);
+    else setAuthReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    api
+      .me(token)
+      .then((nextUser) => {
+        setUser(nextUser);
+        setAuthReady(true);
+      })
+      .catch(() => {
+        window.localStorage.removeItem("yapz_token");
+        setToken(null);
+        setAuthReady(true);
+      });
+  }, [token]);
+
+  useEffect(() => {
+    if (token) void loadServers();
+  }, [loadServers, token]);
+
+  useEffect(() => {
+    if (!token || !activeServerId) {
+      setChannels([]);
+      setMembers([]);
+      setMessages([]);
+      setActiveChannelId(null);
+      return;
+    }
+    Promise.all([api.channels(token, activeServerId), api.members(token, activeServerId)]).then(([channelData, memberData]) => {
+      setChannels(channelData);
+      setMembers(memberData);
+      setActiveChannelId((current) => (current && channelData.some((ch) => ch.id === current) ? current : channelData[0]?.id ?? null));
+    });
+  }, [activeServerId, token]);
+
+  const activeChannel = useMemo(() => channels.find((channel) => channel.id === activeChannelId) ?? null, [activeChannelId, channels]);
+  const activeServer = useMemo(() => servers.find((server) => server.id === activeServerId) ?? null, [activeServerId, servers]);
+
+  useEffect(() => {
+    if (!token || !activeChannelId) return;
+    api.messages(token, activeChannelId).then(setMessages).catch(() => setMessages([]));
+  }, [activeChannelId, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    const ws = new WebSocket(`${api.url.replace("http", "ws")}/ws?token=${encodeURIComponent(token)}`);
+    wsRef.current = ws;
+    ws.onopen = () => setStatus("在线");
+    ws.onclose = () => setStatus("已断开");
+    ws.onerror = () => setStatus("连接异常");
+    ws.onmessage = (event) => {
+      const envelope = JSON.parse(event.data);
+      if (envelope.type === "message_created" && envelope.payload) {
+        const msg = envelope.payload as Message;
+        setMessages((prev) => (prev.some((item) => item.id === msg.id) ? prev : [...prev, msg]));
+      }
+      if (envelope.type === "voice_join" && envelope.username) setStatus(`${envelope.username} 加入语音`);
+      if (envelope.type === "voice_leave" && envelope.username) setStatus(`${envelope.username} 离开语音`);
+      if (envelope.type === "member_removed") {
+        void loadServers();
+        window.alert("你已被移出该服务器");
+      }
+    };
+    return () => ws.close();
+  }, [token]);
+
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && activeChannelId) {
+      wsRef.current.send(JSON.stringify({ type: "join_channel", channelId: activeChannelId }));
+    }
+  }, [activeChannelId, status]);
+
+  function handleAuth(nextToken: string, nextUser: User) {
+    window.localStorage.setItem("yapz_token", nextToken);
+    setToken(nextToken);
+    setUser(nextUser);
+  }
+
+  function logout() {
+    window.localStorage.removeItem("yapz_token");
+    wsRef.current?.close();
+    setToken(null);
+    setUser(null);
+    setServers([]);
+    setChannels([]);
+    setMessages([]);
+    setMembers([]);
+    setView("chat");
+  }
+
+  async function removeMember(memberID: string) {
+    if (!token || !activeServerId) return;
+    await api.removeMember(token, activeServerId, memberID);
+    setMembers(await api.members(token, activeServerId));
+    await loadServers();
+  }
+
+  async function leaveServer() {
+    if (!activeServerId || !user || !window.confirm("确定退出当前服务器？")) return;
+    await removeMember(user.id);
+    setActiveServerId(null);
+  }
+
+  function sendVoiceSignal(channelID: string, targetID: string, payload: unknown) {
+    wsRef.current?.send(JSON.stringify({ type: "voice_signal", channelId: channelID, targetId: targetID, payload }));
+  }
+
+  function closeVoice() {
+    Object.values(peersRef.current).forEach((peer) => peer.close());
+    peersRef.current = {};
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    processedLocalStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current = null;
+    processedLocalStreamRef.current = null;
+    micGainRef.current = null;
+    setRemoteStreams({});
+    setVoiceMembers({});
+  }
+
+  async function prepareLocalAudio() {
+    const sourceStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+    const context = audioContextRef.current ?? new AudioContext();
+    audioContextRef.current = context;
+    await context.resume();
+    const source = context.createMediaStreamSource(sourceStream);
+    const gain = context.createGain();
+    gain.gain.value = inputGain;
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    const destination = context.createMediaStreamDestination();
+    source.connect(gain);
+    gain.connect(analyser);
+    gain.connect(destination);
+    watchAudioLevel(analyser, setLocalLevel);
+    localStreamRef.current = sourceStream;
+    processedLocalStreamRef.current = destination.stream;
+    micGainRef.current = gain;
+  }
+
+  async function ensurePeer(targetID: string, targetName: string, channelID: string) {
+    if (peersRef.current[targetID]) return peersRef.current[targetID];
+    const stream = processedLocalStreamRef.current;
+    if (!stream) throw new Error("missing local stream");
+    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+    peer.onicecandidate = (event) => {
+      if (event.candidate) sendVoiceSignal(channelID, targetID, { kind: "ice", candidate: event.candidate });
+    };
+    peer.ontrack = (event) => {
+      setRemoteStreams((prev) => ({ ...prev, [targetID]: event.streams[0] }));
+      setVoiceMembers((prev) => ({ ...prev, [targetID]: targetName }));
+    };
+    peersRef.current[targetID] = peer;
+    return peer;
+  }
+
+  useEffect(() => {
+    return () => closeVoice();
+  }, []);
+
+  useEffect(() => {
+    localStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !muted;
+    });
+    processedLocalStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !muted;
+    });
+  }, [muted]);
+
+  useEffect(() => {
+    if (micGainRef.current) micGainRef.current.gain.value = inputGain;
+  }, [inputGain]);
+
+  useEffect(() => {
+    if (!token || !user) return;
+    const ws = wsRef.current;
+    if (!ws) return;
+    const original = ws.onmessage;
+    ws.onmessage = async (event) => {
+      original?.call(ws, event);
+      const envelope = JSON.parse(event.data);
+      if (!activeChannelId || envelope.channelId !== activeChannelId) return;
+      if (envelope.type === "voice_join" && envelope.userId !== user.id && localStreamRef.current) {
+        playJoinTone();
+        const peer = await ensurePeer(envelope.userId, envelope.username, activeChannelId);
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        sendVoiceSignal(activeChannelId, envelope.userId, { kind: "offer", description: offer });
+        setVoiceMembers((prev) => ({ ...prev, [envelope.userId]: envelope.username }));
+      }
+      if (envelope.type === "voice_leave") {
+        peersRef.current[envelope.userId]?.close();
+        delete peersRef.current[envelope.userId];
+        setRemoteStreams((prev) => {
+          const next = { ...prev };
+          delete next[envelope.userId];
+          return next;
+        });
+        setVoiceMembers((prev) => {
+          const next = { ...prev };
+          delete next[envelope.userId];
+          return next;
+        });
+      }
+      if (envelope.type === "voice_signal" && envelope.userId !== user.id && processedLocalStreamRef.current) {
+        const payload = envelope.payload;
+        const peer = await ensurePeer(envelope.userId, envelope.username, activeChannelId);
+        if (payload.kind === "offer") {
+          await peer.setRemoteDescription(payload.description);
+          const answer = await peer.createAnswer();
+          await peer.setLocalDescription(answer);
+          sendVoiceSignal(activeChannelId, envelope.userId, { kind: "answer", description: answer });
+        }
+        if (payload.kind === "answer") await peer.setRemoteDescription(payload.description);
+        if (payload.kind === "ice") await peer.addIceCandidate(payload.candidate);
+      }
+    };
+    return () => {
+      if (ws.onmessage !== original) ws.onmessage = original;
+    };
+  }, [activeChannelId, token, user]);
+
+  if (!authReady) return <LoadingScreen />;
+  if (!token || !user) return <AuthScreen onAuthed={handleAuth} />;
+
+  return (
+    <main className="flex min-h-screen bg-ink text-zinc-100 max-lg:flex-col lg:h-screen">
+      <aside className="flex border-r border-line bg-[#14171d] p-3 max-lg:w-full max-lg:flex-row lg:w-[76px] lg:flex-col lg:items-center lg:gap-3 lg:py-4">
+        <Button title="聊天主页" onClick={() => setView("chat")} className="h-12 w-12 p-0">
+          <Gamepad2 size={24} />
+        </Button>
+        <div className="h-px w-10 bg-line" />
+        {servers.map((server) => (
+          <button
+            key={server.id}
+            title={server.name}
+            onClick={() => {
+              setActiveServerId(server.id);
+              setView("chat");
+            }}
+            className={cn(
+              "grid h-12 w-12 place-items-center rounded-lg border text-sm font-bold transition",
+              activeServerId === server.id && view === "chat" ? "border-mint bg-mint text-ink" : "border-line bg-rail text-zinc-200 hover:border-zinc-400"
+            )}
+          >
+            {server.iconText.slice(0, 2)}
+          </button>
+        ))}
+        <CreateServerButton token={token} onCreated={loadServers} />
+      </aside>
+
+      <aside className="flex flex-col border-r border-line bg-panel max-lg:w-full lg:w-[306px]">
+        <div className="border-b border-line px-4 py-4">
+          <p className="text-xs uppercase text-zinc-500">当前服务器</p>
+          <h1 className="mt-1 truncate text-lg font-semibold">{activeServer?.name ?? "创建或加入服务器"}</h1>
+          <p className="mt-1 line-clamp-2 text-sm text-zinc-400">{activeServer?.description || "通过邀请码加入朋友的频道，或创建自己的游戏空间。"}</p>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <JoinInviteButton token={token} onJoined={loadServers} />
+            <InviteButton token={token} server={activeServer} />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-3 py-4">
+          <ChannelGroup title="文字频道" kind="text" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} serverId={activeServerId} onCreated={(channel) => setChannels((prev) => [...prev, channel])} />
+          <ChannelGroup title="语音频道" kind="voice" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} serverId={activeServerId} onCreated={(channel) => setChannels((prev) => [...prev, channel])} />
+        </div>
+
+        <div className="border-t border-line bg-[#171a21] p-3">
+          <div className="mb-3 flex items-center gap-3">
+            <div className="grid h-10 w-10 place-items-center rounded-lg bg-coral font-bold text-white">{user.username[0]?.toUpperCase()}</div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-semibold">{user.username}</p>
+              <p className="text-xs text-mint">{status}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <Button title="设置" variant={view === "settings" ? "default" : "secondary"} onClick={() => setView("settings")}>
+              <Settings size={16} />
+            </Button>
+            <Button title="管理员" variant={view === "admin" ? "default" : "secondary"} onClick={() => setView("admin")} disabled={user.role !== "admin"}>
+              <UserCog size={16} />
+            </Button>
+            <Button title="退出" variant="secondary" onClick={logout}>
+              <LogOut size={16} />
+            </Button>
+          </div>
+        </div>
+      </aside>
+
+      {view === "settings" ? (
+        <SettingsView token={token} user={user} />
+      ) : view === "admin" ? (
+        <AdminView token={token} />
+      ) : (
+        <>
+          <section className="flex min-h-[70vh] min-w-0 flex-1 flex-col">
+            <header className="flex h-16 items-center justify-between border-b border-line bg-[#181b22] px-5">
+              <div className="flex items-center gap-3">
+                {activeChannel?.kind === "voice" ? <Volume2 className="text-mint" size={22} /> : <Hash className="text-zinc-500" size={22} />}
+                <div>
+                  <h2 className="text-base font-semibold">{activeChannel?.name ?? "暂无频道"}</h2>
+                  <p className="text-xs text-zinc-500">{activeChannel?.kind === "voice" ? "语音频道" : "文字频道"}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-zinc-400">
+                <Shield size={16} />
+                <span>{activeServer?.role === "owner" ? "服务器拥有者" : "成员"}</span>
+              </div>
+            </header>
+            {activeChannel?.kind === "voice" ? (
+              <VoicePanel
+                channel={activeChannel}
+                user={user}
+                joined={voiceChannelId === activeChannel.id}
+                muted={muted}
+                members={voiceMembers}
+                remoteStreams={remoteStreams}
+                remoteVolumes={remoteVolumes}
+                inputGain={inputGain}
+                outputGain={outputGain}
+                onInputGain={setInputGain}
+                onOutputGain={setOutputGain}
+                onRemoteVolume={(id, value) => setRemoteVolumes((prev) => ({ ...prev, [id]: value }))}
+                onRemoteLevel={(id, value) => setRemoteLevels((prev) => ({ ...prev, [id]: value }))}
+                localLevel={localLevel}
+                remoteLevels={remoteLevels}
+                onToggleMute={() => setMuted((value) => !value)}
+                onJoin={async () => {
+                  await prepareLocalAudio();
+                  setVoiceChannelId(activeChannel.id);
+                  setVoiceMembers({ [user.id]: user.username });
+                  wsRef.current?.send(JSON.stringify({ type: "voice_join", channelId: activeChannel.id }));
+                  playJoinTone();
+                }}
+                onLeave={() => {
+                  wsRef.current?.send(JSON.stringify({ type: "voice_leave", channelId: activeChannel.id }));
+                  setVoiceChannelId(null);
+                  closeVoice();
+                }}
+              />
+            ) : (
+              <ChatPanel token={token} channel={activeChannel} messages={messages} />
+            )}
+          </section>
+          <MembersPanel members={members} currentUser={user} activeServer={activeServer} onKick={removeMember} onLeave={leaveServer} />
+        </>
+      )}
+    </main>
+  );
+}
+
+function playJoinTone() {
+  const context = new AudioContext();
+  const gain = context.createGain();
+  gain.gain.value = 0.08;
+  gain.connect(context.destination);
+  const first = context.createOscillator();
+  const second = context.createOscillator();
+  first.frequency.value = 523.25;
+  second.frequency.value = 659.25;
+  first.connect(gain);
+  second.connect(gain);
+  first.start();
+  second.start(context.currentTime + 0.08);
+  first.stop(context.currentTime + 0.12);
+  second.stop(context.currentTime + 0.22);
+  window.setTimeout(() => context.close(), 400);
+}
+
+function watchAudioLevel(analyser: AnalyserNode, onLevel: (value: number) => void) {
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  let frame = 0;
+  const tick = () => {
+    analyser.getByteFrequencyData(data);
+    const avg = data.reduce((sum, item) => sum + item, 0) / data.length;
+    onLevel(Math.min(1, avg / 90));
+    frame = requestAnimationFrame(tick);
+  };
+  tick();
+  return () => cancelAnimationFrame(frame);
+}
+
+function LoadingScreen() {
+  return (
+    <main className="grid min-h-screen place-items-center bg-ink text-zinc-300">
+      <div className="flex items-center gap-3 text-sm"><Loader2 className="animate-spin text-mint" size={18} /> 正在恢复登录状态...</div>
+    </main>
+  );
+}
+
+function AuthScreen({ onAuthed }: { onAuthed: (token: string, user: User) => void }) {
+  const [mode, setMode] = useState<AuthMode>("login");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setLoading(true);
+    const form = new FormData(event.currentTarget);
+    try {
+      const response =
+        mode === "login"
+          ? await api.login({ login: String(form.get("login")), password: String(form.get("password")) })
+          : await api.register({ username: String(form.get("username")), email: String(form.get("email")), password: String(form.get("password")) });
+      onAuthed(response.token, response.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "登录失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="grid min-h-screen place-items-center bg-ink px-6">
+      <Card className="w-full max-w-[420px] p-6">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="grid h-12 w-12 place-items-center rounded-lg bg-mint text-ink">
+            <Gamepad2 size={26} />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold">Yapz</h1>
+            <p className="text-sm text-zinc-400">游戏频道聊天与语音开黑平台</p>
+          </div>
+        </div>
+        <div className="mb-5 grid grid-cols-2 rounded-lg bg-[#12151b] p-1">
+          <Button type="button" variant={mode === "login" ? "default" : "ghost"} onClick={() => setMode("login")}>登录</Button>
+          <Button type="button" variant={mode === "register" ? "default" : "ghost"} onClick={() => setMode("register")}>注册</Button>
+        </div>
+        <form className="space-y-4" onSubmit={submit}>
+          {mode === "register" && (
+            <>
+              <Field name="username" label="用户名" placeholder="例如 ShadowCarry" />
+              <Field name="email" label="邮箱" type="email" placeholder="you@example.com" />
+            </>
+          )}
+          {mode === "login" && <Field name="login" label="用户名或邮箱" placeholder="admin@yapz.local" />}
+          <Field name="password" label="密码" type="password" placeholder="至少 8 位" />
+          {error && <p className="rounded-md border border-coral/50 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</p>}
+          <Button disabled={loading} className="w-full">{loading ? "处理中..." : mode === "login" ? "进入 Yapz" : "创建账号"}</Button>
+        </form>
+      </Card>
+    </main>
+  );
+}
+
+function Field({ label, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { label: string }) {
+  return (
+    <Label>
+      <span className="mb-2 block">{label}</span>
+      <Input {...props} required />
+    </Label>
+  );
+}
+
+function ChannelGroup(props: {
+  title: string;
+  kind: "text" | "voice";
+  channels: Channel[];
+  activeChannelId: string | null;
+  onSelect: (id: string) => void;
+  token: string;
+  serverId: string | null;
+  onCreated: (channel: Channel) => void;
+}) {
+  const list = props.channels.filter((channel) => channel.kind === props.kind);
+  const [creating, setCreating] = useState(false);
+  const disabled = !props.serverId || creating;
+
+  async function createChannel() {
+    if (!props.serverId) return;
+    const name = window.prompt(`新建${props.kind === "text" ? "文字" : "语音"}频道名称`);
+    if (!name) return;
+    const channel = await api.createChannel(props.token, props.serverId, { name, kind: props.kind });
+    props.onCreated(channel);
+  }
+
+  return (
+    <div className="mb-6">
+      <div className="mb-2 flex items-center justify-between px-1 text-xs font-semibold uppercase text-zinc-500">
+        <span>{props.title}</span>
+        <Button title={props.serverId ? "添加频道" : "请先创建或加入服务器"} variant="ghost" disabled={disabled} onClick={async () => { setCreating(true); try { await createChannel(); } finally { setCreating(false); } }} className="h-7 w-7 p-0">
+          <Plus size={15} />
+        </Button>
+      </div>
+      {!props.serverId ? <p className="rounded-md border border-dashed border-line px-3 py-2 text-xs text-zinc-500">创建或加入服务器后可添加频道</p> : null}
+      <div className="space-y-1">
+        {list.map((channel) => (
+          <button key={channel.id} onClick={() => props.onSelect(channel.id)} className={cn("flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition", props.activeChannelId === channel.id ? "bg-rail text-white" : "text-zinc-400 hover:bg-[#232831] hover:text-zinc-100")}>
+            {channel.kind === "voice" ? <Volume2 size={17} /> : <Hash size={17} />}
+            <span className="truncate">{channel.name}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function JoinInviteButton({ token, onJoined }: { token: string; onJoined: () => Promise<void> }) {
+  async function join() {
+    const code = window.prompt("输入朋友给你的邀请码");
+    if (!code) return;
+    await api.joinInvite(token, code);
+    await onJoined();
+  }
+  return <Button variant="secondary" onClick={join}>加入</Button>;
+}
+
+function InviteButton({ token, server }: { token: string; server: Server | null }) {
+  async function invite() {
+    if (!server) return;
+    const data = await api.invite(token, server.id);
+    await navigator.clipboard?.writeText(data.code);
+    window.alert(`邀请码：${data.code}\n已复制到剪贴板`);
+  }
+  return <Button variant="secondary" disabled={!server} onClick={invite}><Copy size={15} /> 邀请</Button>;
+}
+
+function ChatPanel({ token, channel, messages }: { token: string; channel: Channel | null; messages: Message[] }) {
+  const [content, setContent] = useState("");
+  const endRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages]);
+  async function send(event: FormEvent) {
+    event.preventDefault();
+    if (!channel || !content.trim()) return;
+    await api.sendMessage(token, channel.id, content.trim());
+    setContent("");
+  }
+  return (
+    <>
+      <div className="flex-1 overflow-y-auto px-6 py-6">
+        {messages.length === 0 ? (
+          <div className="grid h-full place-items-center text-center text-zinc-500">
+            <div><Hash className="mx-auto mb-3" size={34} /><p className="text-lg font-semibold text-zinc-300">这里还没有消息</p><p className="mt-1 text-sm">发送第一条消息开始组队。</p></div>
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {messages.map((message) => (
+              <div key={message.id} className="flex gap-3">
+                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-rail text-sm font-bold">{message.username[0]?.toUpperCase()}</div>
+                <div><div className="flex items-baseline gap-2"><p className="font-semibold">{message.username}</p><time className="text-xs text-zinc-500">{new Date(message.createdAt).toLocaleString()}</time></div><p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-200">{message.content}</p></div>
+              </div>
+            ))}
+            <div ref={endRef} />
+          </div>
+        )}
+      </div>
+      <form onSubmit={send} className="border-t border-line bg-[#181b22] p-4">
+        <div className="flex items-center gap-3 rounded-lg border border-line bg-[#101319] px-4 py-2">
+          <input value={content} onChange={(event) => setContent(event.target.value)} placeholder={channel ? `发送消息到 #${channel.name}` : "请选择频道"} className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none" />
+          <Button title="发送" className="h-9 w-9 p-0"><Send size={17} /></Button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+function VoicePanel(props: {
+  channel: Channel;
+  user: User;
+  joined: boolean;
+  muted: boolean;
+  members: Record<string, string>;
+  remoteStreams: Record<string, MediaStream>;
+  remoteVolumes: Record<string, number>;
+  remoteLevels: Record<string, number>;
+  localLevel: number;
+  inputGain: number;
+  outputGain: number;
+  onInputGain: (value: number) => void;
+  onOutputGain: (value: number) => void;
+  onRemoteVolume: (id: string, value: number) => void;
+  onRemoteLevel: (id: string, value: number) => void;
+  onJoin: () => void;
+  onLeave: () => void;
+  onToggleMute: () => void;
+}) {
+  const remoteEntries = Object.entries(props.remoteStreams);
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8 text-center sm:px-8">
+      <div className="grid h-24 w-24 place-items-center rounded-xl bg-rail text-mint"><Headphones size={48} /></div>
+      <h2 className="mt-6 text-2xl font-bold">{props.channel.name}</h2>
+      <p className="mt-2 max-w-[560px] text-sm leading-6 text-zinc-400">语音使用浏览器 WebRTC 传输，媒体流默认通过 DTLS-SRTP 加密；服务器只转发信令，不接触音频内容。</p>
+      <div className="mt-8 flex items-center gap-3">
+        {!props.joined ? <Button onClick={props.onJoin}>加入语音</Button> : <><Button variant="secondary" onClick={props.onToggleMute} className="h-12 w-12 p-0">{props.muted ? <MicOff size={20} /> : <Mic size={20} />}</Button><Button variant="destructive" onClick={props.onLeave}>离开语音</Button></>}
+      </div>
+      {props.joined && <p className="mt-4 text-sm text-zinc-400">{props.user.username} 正在频道中{props.muted ? "，麦克风已静音" : ""}</p>}
+      {props.joined ? (
+        <Card className="mt-6 w-full max-w-[720px] p-4 text-left">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <VolumeControl label="我的麦克风音量" value={props.inputGain} onChange={props.onInputGain} />
+            <VolumeControl label="听筒总音量" value={props.outputGain} onChange={props.onOutputGain} />
+          </div>
+        </Card>
+      ) : null}
+      <div className="mt-6 grid w-full max-w-[720px] grid-cols-1 gap-3 sm:grid-cols-2">
+        {Object.entries(props.members).map(([id, name]) => (
+          <Card key={id} className="p-3 text-left">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{name}</p>
+                <p className="text-xs text-zinc-500">{id === props.user.id ? "本地加密音频" : "远端加密音频"}</p>
+              </div>
+              <Badge>加密</Badge>
+            </div>
+            {id !== props.user.id ? <VolumeControl label="个人听筒" value={props.remoteVolumes[id] ?? 1} onChange={(value) => props.onRemoteVolume(id, value)} compact /> : null}
+            <LevelMeter level={id === props.user.id ? props.localLevel : props.remoteLevels[id] ?? 0} />
+          </Card>
+        ))}
+      </div>
+      {remoteEntries.map(([id, stream]) => <RemoteAudio key={id} stream={stream} volume={(props.remoteVolumes[id] ?? 1) * props.outputGain} onLevel={(value) => props.onRemoteLevel(id, value)} />)}
+    </div>
+  );
+}
+
+function VolumeControl({ label, value, onChange, compact = false }: { label: string; value: number; onChange: (value: number) => void; compact?: boolean }) {
+  return (
+    <label className={cn("block", compact ? "mt-3" : "")}>
+      <div className="mb-2 flex items-center justify-between text-xs text-zinc-400">
+        <span>{label}</span>
+        <span>{Math.round(value * 100)}%</span>
+      </div>
+      <input className="w-full accent-mint" type="range" min="0" max="2" step="0.01" value={value} onChange={(event) => onChange(Number(event.target.value))} />
+    </label>
+  );
+}
+
+function LevelMeter({ level }: { level: number }) {
+  return (
+    <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#11151d]">
+      <div className={cn("h-full rounded-full transition-all", level > 0.72 ? "bg-coral" : level > 0.38 ? "bg-amber" : "bg-mint")} style={{ width: `${Math.round(level * 100)}%` }} />
+    </div>
+  );
+}
+
+function RemoteAudio({ stream, volume, onLevel }: { stream: MediaStream; volume: number; onLevel: (value: number) => void }) {
+  const ref = useRef<HTMLAudioElement | null>(null);
+  const onLevelRef = useRef(onLevel);
+  useEffect(() => {
+    onLevelRef.current = onLevel;
+  }, [onLevel]);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  useEffect(() => {
+    if (ref.current) ref.current.volume = Math.min(1, Math.max(0, volume));
+  }, [volume]);
+  useEffect(() => {
+    const context = new AudioContext();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    const stop = watchAudioLevel(analyser, (value) => onLevelRef.current(value));
+    return () => {
+      stop();
+      context.close();
+    };
+  }, [stream]);
+  return <audio ref={ref} autoPlay playsInline />;
+}
+
+function MembersPanel({
+  members,
+  currentUser,
+  activeServer,
+  onKick,
+  onLeave
+}: {
+  members: Member[];
+  currentUser: User;
+  activeServer: Server | null;
+  onKick: (memberID: string) => Promise<void>;
+  onLeave: () => Promise<void>;
+}) {
+  const canKick = activeServer?.role === "owner";
+  return (
+    <aside className="border-l border-line bg-[#171a21] max-lg:w-full lg:w-[252px]">
+      <div className="border-b border-line px-4 py-4">
+        <p className="text-xs uppercase text-zinc-500">在线成员</p>
+        <p className="mt-1 text-sm text-zinc-300">{members.length} 位成员</p>
+        {activeServer && activeServer.role !== "owner" ? <Button variant="secondary" onClick={onLeave} className="mt-3 w-full">退出服务器</Button> : null}
+      </div>
+      <div className="space-y-2 p-3">
+        {members.map((member) => (
+          <div key={member.id} className="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-rail">
+            <div className="relative grid h-9 w-9 place-items-center rounded-lg bg-[#2c3340] text-sm font-bold">{member.username[0]?.toUpperCase()}<span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#171a21] bg-mint" /></div>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{member.username}</p><p className="text-xs text-zinc-500">{member.role}</p></div>
+            {canKick && member.id !== currentUser.id && member.role !== "owner" ? (
+              <Button title="踢出成员" variant="ghost" onClick={() => onKick(member.id)} className="h-8 w-8 p-0 text-coral"><UserMinus size={15} /></Button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function SettingsView({ token, user }: { token: string; user: User }) {
+  const [message, setMessage] = useState("");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage("");
+    const form = new FormData(event.currentTarget);
+    await api.changePassword(token, { currentPassword: String(form.get("currentPassword")), nextPassword: String(form.get("nextPassword")) });
+    event.currentTarget.reset();
+    setMessage("密码已修改");
+  }
+  return (
+    <section className="flex-1 overflow-y-auto p-8">
+      <div className="max-w-[720px]">
+        <h2 className="text-2xl font-bold">个人中心</h2>
+        <p className="mt-2 text-sm text-zinc-400">管理账号安全信息。</p>
+        <Card className="mt-6 p-5">
+          <div className="mb-5 flex items-center gap-3"><KeyRound className="text-mint" /><div><h3 className="font-semibold">修改密码</h3><p className="text-sm text-zinc-500">{user.email}</p></div></div>
+          <form onSubmit={submit} className="space-y-4">
+            <Field name="currentPassword" label="当前密码" type="password" />
+            <Field name="nextPassword" label="新密码" type="password" />
+            {message && <p className="text-sm text-mint">{message}</p>}
+            <Button>保存新密码</Button>
+          </form>
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function AdminView({ token }: { token: string }) {
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [servers, setServers] = useState<AdminServer[]>([]);
+  const [channels, setChannels] = useState<AdminChannel[]>([]);
+  const load = useCallback(async () => {
+    const [u, s, c] = await Promise.all([api.adminUsers(token), api.adminServers(token), api.adminChannels(token)]);
+    setUsers(u);
+    setServers(s);
+    setChannels(c);
+  }, [token]);
+  useEffect(() => { void load(); }, [load]);
+  async function deleteChannel(id: string) {
+    if (!window.confirm("确定删除这个频道？")) return;
+    await api.deleteAdminChannel(token, id);
+    await load();
+  }
+  return (
+    <section className="flex-1 overflow-y-auto p-8">
+      <h2 className="text-2xl font-bold">管理员控制台</h2>
+      <p className="mt-2 text-sm text-zinc-400">管理所有账号、服务器和频道。</p>
+      <div className="mt-6 grid grid-cols-3 gap-4">
+        <Stat label="账号" value={users.length} />
+        <Stat label="服务器" value={servers.length} />
+        <Stat label="频道" value={channels.length} />
+      </div>
+      <Card className="mt-6 p-5"><h3 className="mb-4 font-semibold">账号</h3><div className="space-y-2">{users.map((user) => <Row key={user.id} left={`${user.username} · ${user.email}`} right={<><Badge>{user.role}</Badge><span>{user.serverCount} 个服务器</span></>} />)}</div></Card>
+      <Card className="mt-6 p-5"><h3 className="mb-4 font-semibold">服务器</h3><div className="space-y-2">{servers.map((server) => <Row key={server.id} left={server.name} right={<span>{server.ownerName} · {server.memberCount} 成员 · {server.channelCount} 频道</span>} />)}</div></Card>
+      <Card className="mt-6 p-5"><h3 className="mb-4 font-semibold">频道</h3><div className="space-y-2">{channels.map((channel) => <Row key={channel.id} left={`${channel.serverName} / ${channel.name}`} right={<><Badge>{channel.kind}</Badge><Button variant="destructive" onClick={() => deleteChannel(channel.id)} className="h-8 px-2"><Trash2 size={14} /></Button></>} />)}</div></Card>
+    </section>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return <Card className="p-4"><p className="text-sm text-zinc-500">{label}</p><p className="mt-2 text-3xl font-bold">{value}</p></Card>;
+}
+
+function Row({ left, right }: { left: string; right: React.ReactNode }) {
+  return <div className="flex items-center justify-between rounded-md border border-line bg-[#151922] px-3 py-2 text-sm"><span className="truncate">{left}</span><div className="flex shrink-0 items-center gap-2 text-zinc-400">{right}</div></div>;
+}
+
+function CreateServerButton({ token, onCreated }: { token: string; onCreated: () => Promise<void> }) {
+  async function create() {
+    const name = window.prompt("服务器名称");
+    if (!name) return;
+    await api.createServer(token, { name, description: "新的游戏开黑频道", iconText: name.slice(0, 2).toUpperCase() });
+    await onCreated();
+  }
+  return <button title="创建服务器" onClick={create} className="grid h-12 w-12 place-items-center rounded-lg border border-dashed border-line text-zinc-400 hover:border-mint hover:text-mint"><Plus size={22} /></button>;
+}

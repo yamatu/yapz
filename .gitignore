@@ -1,0 +1,21 @@
+.DS_Store
+Thumbs.db
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/npm-debug.log*
+
+# Go
+backend/bin/
+backend/tmp/
+backend/*.exe
+
+# Env
+.env
+*.local
+deploy/.env
+
+# Logs
+*.log
