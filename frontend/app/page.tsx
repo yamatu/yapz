@@ -60,6 +60,9 @@ export default function Home() {
   const pendingVoiceJoinRef = useRef<string | null>(null);
   const voiceChannelRef = useRef<string | null>(null);
   const textChannelRef = useRef<string | null>(null);
+  const activeServerIdRef = useRef<string | null>(null);
+  const userRef = useRef<User | null>(null);
+  const loadServersRef = useRef<() => void>(() => undefined);
   const wsRef = useRef<WebSocket | null>(null);
 
   const loadServers = useCallback(async () => {
@@ -102,6 +105,12 @@ export default function Home() {
   }, [loadServers, token]);
 
   useEffect(() => {
+    loadServersRef.current = () => {
+      void loadServers();
+    };
+  }, [loadServers]);
+
+  useEffect(() => {
     if (!token || !activeServerId) {
       setChannels([]);
       setMembers([]);
@@ -138,7 +147,7 @@ export default function Home() {
     ws.onopen = () => setStatus("在线");
     ws.onclose = () => setStatus("已断开");
     ws.onerror = () => setStatus("连接异常");
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
       const envelope = JSON.parse(event.data);
       if (envelope.type === "message_created" && envelope.payload) {
         const msg = envelope.payload as Message;
@@ -149,16 +158,59 @@ export default function Home() {
       if (envelope.type === "voice_join" && envelope.username) setStatus(`${envelope.username} 加入语音`);
       if (envelope.type === "voice_leave" && envelope.username) setStatus(`${envelope.username} 离开语音`);
       if (envelope.type === "member_removed") {
-        void loadServers();
+        loadServersRef.current();
         window.alert("你已被移出该服务器");
       }
-      if (envelope.type === "member_status" && envelope.serverId === activeServerId && envelope.payload) {
+      if (envelope.type === "member_status" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
         const payload = envelope.payload as { userId: string; status: string };
         setMembers((prev) => prev.map((member) => (member.id === payload.userId ? { ...member, status: payload.status } : member)));
       }
+      if (envelope.type === "channel_joined" && pendingVoiceJoinRef.current === envelope.channelId) {
+        pendingVoiceJoinRef.current = null;
+        wsRef.current?.send(JSON.stringify({ type: "voice_join", channelId: envelope.channelId }));
+      }
+      const currentVoiceChannel = voiceChannelRef.current;
+      const currentUser = userRef.current;
+      if (!currentVoiceChannel || envelope.channelId !== currentVoiceChannel || !currentUser) return;
+      if (envelope.type === "voice_members" && processedLocalStreamRef.current) {
+        const existing = (envelope.payload ?? []) as Array<{ userId: string; username: string }>;
+        for (const member of existing) {
+          if (member.userId !== currentUser.id) await sendOffer(member.userId, member.username, currentVoiceChannel);
+        }
+      }
+      if (envelope.type === "voice_join" && envelope.userId !== currentUser.id) {
+        playJoinTone();
+        setVoiceMembers((prev) => ({ ...prev, [envelope.userId]: envelope.username }));
+      }
+      if (envelope.type === "voice_leave") {
+        peersRef.current[envelope.userId]?.close();
+        delete peersRef.current[envelope.userId];
+        setRemoteStreams((prev) => {
+          const next = { ...prev };
+          delete next[envelope.userId];
+          return next;
+        });
+        setVoiceMembers((prev) => {
+          const next = { ...prev };
+          delete next[envelope.userId];
+          return next;
+        });
+      }
+      if (envelope.type === "voice_signal" && envelope.userId !== currentUser.id && processedLocalStreamRef.current) {
+        const payload = envelope.payload;
+        const peer = await ensurePeer(envelope.userId, envelope.username, currentVoiceChannel);
+        if (payload.kind === "offer") {
+          await peer.setRemoteDescription(payload.description);
+          const answer = await peer.createAnswer();
+          await peer.setLocalDescription(answer);
+          sendVoiceSignal(currentVoiceChannel, envelope.userId, { kind: "answer", description: answer });
+        }
+        if (payload.kind === "answer") await peer.setRemoteDescription(payload.description);
+        if (payload.kind === "ice") await peer.addIceCandidate(payload.candidate);
+      }
     };
     return () => ws.close();
-  }, [activeServerId, loadServers, token]);
+  }, [token]);
 
   useEffect(() => {
     voiceChannelRef.current = voiceChannelId;
@@ -167,6 +219,14 @@ export default function Home() {
   useEffect(() => {
     textChannelRef.current = textChannelId;
   }, [textChannelId]);
+
+  useEffect(() => {
+    activeServerIdRef.current = activeServerId;
+  }, [activeServerId]);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN && activeServerId) {
@@ -305,62 +365,6 @@ export default function Home() {
     if (micGainRef.current) micGainRef.current.gain.value = inputGain;
   }, [inputGain]);
 
-  useEffect(() => {
-    if (!token || !user) return;
-    const ws = wsRef.current;
-    if (!ws) return;
-    const original = ws.onmessage;
-    ws.onmessage = async (event) => {
-      original?.call(ws, event);
-      const envelope = JSON.parse(event.data);
-      const currentVoiceChannel = voiceChannelRef.current;
-      if (envelope.type === "channel_joined" && pendingVoiceJoinRef.current === envelope.channelId) {
-        pendingVoiceJoinRef.current = null;
-        wsRef.current?.send(JSON.stringify({ type: "voice_join", channelId: envelope.channelId }));
-      }
-      if (!currentVoiceChannel || envelope.channelId !== currentVoiceChannel) return;
-      if (envelope.type === "voice_members" && processedLocalStreamRef.current) {
-        const existing = (envelope.payload ?? []) as Array<{ userId: string; username: string }>;
-        for (const member of existing) {
-          if (member.userId !== user.id) await sendOffer(member.userId, member.username, currentVoiceChannel);
-        }
-      }
-      if (envelope.type === "voice_join" && envelope.userId !== user.id) {
-        playJoinTone();
-        setVoiceMembers((prev) => ({ ...prev, [envelope.userId]: envelope.username }));
-      }
-      if (envelope.type === "voice_leave") {
-        peersRef.current[envelope.userId]?.close();
-        delete peersRef.current[envelope.userId];
-        setRemoteStreams((prev) => {
-          const next = { ...prev };
-          delete next[envelope.userId];
-          return next;
-        });
-        setVoiceMembers((prev) => {
-          const next = { ...prev };
-          delete next[envelope.userId];
-          return next;
-        });
-      }
-      if (envelope.type === "voice_signal" && envelope.userId !== user.id && processedLocalStreamRef.current) {
-        const payload = envelope.payload;
-        const peer = await ensurePeer(envelope.userId, envelope.username, currentVoiceChannel);
-        if (payload.kind === "offer") {
-          await peer.setRemoteDescription(payload.description);
-          const answer = await peer.createAnswer();
-          await peer.setLocalDescription(answer);
-          sendVoiceSignal(currentVoiceChannel, envelope.userId, { kind: "answer", description: answer });
-        }
-        if (payload.kind === "answer") await peer.setRemoteDescription(payload.description);
-        if (payload.kind === "ice") await peer.addIceCandidate(payload.candidate);
-      }
-    };
-    return () => {
-      if (ws.onmessage !== original) ws.onmessage = original;
-    };
-  }, [token, user]);
-
   if (!authReady) return <LoadingScreen />;
   if (!token || !user) return <AuthScreen onAuthed={handleAuth} />;
 
@@ -429,7 +433,10 @@ export default function Home() {
       </aside>
 
       {view === "settings" ? (
-        <SettingsView token={token} user={user} />
+        <SettingsView token={token} user={user} onUpdated={(updatedUser) => {
+          setUser(updatedUser);
+          window.localStorage.setItem("yapz_user", JSON.stringify(updatedUser));
+        }} />
       ) : view === "admin" ? (
         <AdminView token={token} />
       ) : (
@@ -473,6 +480,10 @@ export default function Home() {
                 remoteLevels={remoteLevels}
                 onToggleMute={() => setMuted((value) => !value)}
                 onJoin={async () => {
+                  if (wsRef.current?.readyState !== WebSocket.OPEN) {
+                    window.alert("实时连接还未就绪，请稍后再加入语音。");
+                    return;
+                  }
                   await prepareLocalAudio();
                   setVoiceChannelId(selectedVoiceChannel.id);
                   setVoiceMembers({ [user.id]: user.username });
@@ -581,9 +592,8 @@ function AuthScreen({ onAuthed }: { onAuthed: (token: string, user: User) => voi
               <Field name="email" label="邮箱" type="email" placeholder="you@example.com" />
             </>
           )}
-          {mode === "login" && <Field name="login" label="用户名或邮箱" placeholder="admin@yapz.local" />}
+          {mode === "login" && <Field name="login" label="用户名或邮箱" placeholder="you@example.com" />}
           <Field name="password" label="密码" type="password" placeholder="至少 8 位" />
-          <p className="text-xs text-zinc-500">默认管理员：admin@yapz.local / Admin123456，可通过 Docker 环境变量覆盖。</p>
           {error && <p className="rounded-md border border-coral/50 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</p>}
           <Button disabled={loading} className="w-full">{loading ? "处理中..." : mode === "login" ? "进入 Yapz" : "创建账号"}</Button>
         </form>
@@ -884,27 +894,54 @@ function MembersPanel({
   );
 }
 
-function SettingsView({ token, user }: { token: string; user: User }) {
-  const [message, setMessage] = useState("");
-  async function submit(event: FormEvent<HTMLFormElement>) {
+function SettingsView({ token, user, onUpdated }: { token: string; user: User; onUpdated: (user: User) => void }) {
+  const [profileMessage, setProfileMessage] = useState("");
+  const [passwordMessage, setPasswordMessage] = useState("");
+  async function submitProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setMessage("");
+    setProfileMessage("");
     const form = new FormData(event.currentTarget);
-    await api.changePassword(token, { currentPassword: String(form.get("currentPassword")), nextPassword: String(form.get("nextPassword")) });
+    try {
+      const updated = await api.updateMe(token, { username: String(form.get("username")), email: String(form.get("email")) });
+      onUpdated(updated);
+      setProfileMessage("账号资料已保存");
+    } catch (err) {
+      setProfileMessage(err instanceof Error ? err.message : "保存失败");
+    }
+  }
+  async function submitPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPasswordMessage("");
+    const form = new FormData(event.currentTarget);
+    try {
+      await api.changePassword(token, { currentPassword: String(form.get("currentPassword")), nextPassword: String(form.get("nextPassword")) });
+      setPasswordMessage("密码已修改");
+    } catch (err) {
+      setPasswordMessage(err instanceof Error ? err.message : "密码修改失败");
+      return;
+    }
     event.currentTarget.reset();
-    setMessage("密码已修改");
   }
   return (
     <section className="flex-1 overflow-y-auto p-8">
       <div className="max-w-[720px]">
         <h2 className="text-2xl font-bold">个人中心</h2>
-        <p className="mt-2 text-sm text-zinc-400">管理账号安全信息。</p>
+        <p className="mt-2 text-sm text-zinc-400">管理账号资料和安全信息。</p>
+        <Card className="mt-6 p-5">
+          <div className="mb-5 flex items-center gap-3"><UserCog className="text-mint" /><div><h3 className="font-semibold">账号资料</h3><p className="text-sm text-zinc-500">修改用户名和登录邮箱。</p></div></div>
+          <form onSubmit={submitProfile} className="space-y-4">
+            <Field name="username" label="用户名" defaultValue={user.username} />
+            <Field name="email" label="邮箱" type="email" defaultValue={user.email} />
+            {profileMessage && <p className={cn("text-sm", profileMessage.includes("已") ? "text-mint" : "text-coral")}>{profileMessage}</p>}
+            <Button>保存账号资料</Button>
+          </form>
+        </Card>
         <Card className="mt-6 p-5">
           <div className="mb-5 flex items-center gap-3"><KeyRound className="text-mint" /><div><h3 className="font-semibold">修改密码</h3><p className="text-sm text-zinc-500">{user.email}</p></div></div>
-          <form onSubmit={submit} className="space-y-4">
+          <form onSubmit={submitPassword} className="space-y-4">
             <Field name="currentPassword" label="当前密码" type="password" />
             <Field name="nextPassword" label="新密码" type="password" />
-            {message && <p className="text-sm text-mint">{message}</p>}
+            {passwordMessage && <p className={cn("text-sm", passwordMessage.includes("已") ? "text-mint" : "text-coral")}>{passwordMessage}</p>}
             <Button>保存新密码</Button>
           </form>
         </Card>

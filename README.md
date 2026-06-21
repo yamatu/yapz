@@ -46,7 +46,9 @@ Default admin account:
 - Email: `admin@yapz.local`
 - Password: `Admin123456`
 
-The backend seeds this account on startup. Override `ADMIN_EMAIL`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` in `docker-compose.yml` or your deployment environment to configure your own administrator account; the configured password is re-applied on each backend start.
+The backend seeds this account on startup only when it does not already exist. Override `ADMIN_EMAIL`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` in `docker-compose.yml` or your deployment environment before the first startup to configure your own administrator account. After the account exists, change its password from the personal center.
+
+Production login uses same-origin `/api` and `/ws` paths. Make sure Nginx proxies `/api/` and `/ws` to the backend on `127.0.0.1:8080`; otherwise the frontend will show a connection error on login/register. Do not run `docker compose down -v` in production unless you intentionally want to delete the PostgreSQL volume and all registered accounts.
 
 ## Default Environment
 

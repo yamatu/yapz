@@ -165,9 +165,20 @@ func (s *Store) EnsureAdmin(ctx context.Context, username, email, password strin
 	_, err = s.db.Exec(ctx, `
 		INSERT INTO users (username, email, password_hash, status, role)
 		VALUES ($1, $2, $3, 'online', 'admin')
-		ON CONFLICT (email) DO UPDATE SET username = EXCLUDED.username, password_hash = EXCLUDED.password_hash, role = 'admin'
+		ON CONFLICT (email) DO UPDATE SET role = 'admin'
 	`, username, email, hash)
 	return err
+}
+
+func (s *Store) UpdateUserProfile(ctx context.Context, userID, username, email string) (User, error) {
+	var u User
+	err := s.db.QueryRow(ctx, `
+		UPDATE users
+		SET username = $1, email = $2
+		WHERE id = $3
+		RETURNING id, username, email, avatar_url, status, role, created_at
+	`, username, email, userID).Scan(&u.ID, &u.Username, &u.Email, &u.AvatarURL, &u.Status, &u.Role, &u.CreatedAt)
+	return u, err
 }
 
 func (s *Store) ChangePassword(ctx context.Context, userID, currentPassword, nextPassword string) error {

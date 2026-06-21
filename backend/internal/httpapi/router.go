@@ -34,6 +34,7 @@ func NewRouter(cfg config.Config, st *store.Store, hub *realtime.Hub) http.Handl
 	mux.HandleFunc("POST /api/auth/register", api.register)
 	mux.HandleFunc("POST /api/auth/login", api.login)
 	mux.Handle("GET /api/me", api.authenticated(http.HandlerFunc(api.me)))
+	mux.Handle("PATCH /api/me", api.authenticated(http.HandlerFunc(api.updateMe)))
 	mux.Handle("POST /api/me/password", api.authenticated(http.HandlerFunc(api.changePassword)))
 	mux.Handle("GET /api/servers", api.authenticated(http.HandlerFunc(api.listServers)))
 	mux.Handle("POST /api/servers", api.authenticated(http.HandlerFunc(api.createServer)))
@@ -168,6 +169,28 @@ func (a *API) me(w http.ResponseWriter, r *http.Request) {
 	user, err := a.store.FindUserByID(r.Context(), claims.UserID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (a *API) updateMe(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Email    string `json:"email"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Username = strings.TrimSpace(body.Username)
+	body.Email = strings.TrimSpace(strings.ToLower(body.Email))
+	if len(body.Username) < 2 || !strings.Contains(body.Email, "@") {
+		writeError(w, http.StatusBadRequest, "invalid username or email")
+		return
+	}
+	user, err := a.store.UpdateUserProfile(r.Context(), claimsFrom(r).UserID, body.Username, body.Email)
+	if err != nil {
+		writeError(w, http.StatusConflict, "username or email already exists")
 		return
 	}
 	writeJSON(w, http.StatusOK, user)

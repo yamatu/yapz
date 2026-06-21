@@ -9,17 +9,23 @@ type AuthResponse = {
 };
 
 async function request<T>(path: string, token?: string | null, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init.headers
-    }
-  });
-  const data = await res.json().catch(() => ({}));
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...init.headers
+      }
+    });
+  } catch {
+    throw new Error("无法连接到服务器，请检查 Nginx 的 /api 和 /ws 反向代理配置");
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  const data = contentType.includes("application/json") ? await res.json().catch(() => ({})) : { error: await res.text().catch(() => "") };
   if (!res.ok) {
-    throw new Error(data.error ?? "Request failed");
+    throw new Error(data.error || `请求失败 (${res.status})`);
   }
   return data as T;
 }
@@ -43,6 +49,8 @@ export const api = {
   login: (body: { login: string; password: string }) =>
     request<AuthResponse>("/api/auth/login", null, { method: "POST", body: JSON.stringify(body) }),
   me: (token: string) => request<User>("/api/me", token),
+  updateMe: (token: string, body: { username: string; email: string }) =>
+    request<User>("/api/me", token, { method: "PATCH", body: JSON.stringify(body) }),
   changePassword: (token: string, body: { currentPassword: string; nextPassword: string }) =>
     request<{ status: string }>("/api/me/password", token, { method: "POST", body: JSON.stringify(body) }),
   servers: (token: string) => requestList<Server>("/api/servers", token),
