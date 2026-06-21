@@ -20,8 +20,14 @@ type Hub struct {
 	broadcast  chan Envelope
 	clients    map[*Client]bool
 	rooms      map[string]map[*Client]bool
+	voiceRooms map[string]map[string]*VoiceMember
 	users      map[string]map[*Client]bool
 	mu         sync.RWMutex
+}
+
+type VoiceMember struct {
+	UserID   string `json:"userId"`
+	Username string `json:"username"`
 }
 
 type Client struct {
@@ -55,6 +61,7 @@ func NewHub(store *store.Store) *Hub {
 		broadcast:  make(chan Envelope, 256),
 		clients:    map[*Client]bool{},
 		rooms:      map[string]map[*Client]bool{},
+		voiceRooms: map[string]map[string]*VoiceMember{},
 		users:      map[string]map[*Client]bool{},
 	}
 }
@@ -132,6 +139,36 @@ func (h *Hub) join(client *Client, channelID string) {
 	client.rooms[channelID] = true
 }
 
+func (h *Hub) joinVoice(client *Client, channelID string) []VoiceMember {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.rooms[channelID] == nil {
+		h.rooms[channelID] = map[*Client]bool{}
+	}
+	h.rooms[channelID][client] = true
+	client.rooms[channelID] = true
+	if h.voiceRooms[channelID] == nil {
+		h.voiceRooms[channelID] = map[string]*VoiceMember{}
+	}
+	existing := make([]VoiceMember, 0, len(h.voiceRooms[channelID]))
+	for id, member := range h.voiceRooms[channelID] {
+		if id != client.userID {
+			existing = append(existing, *member)
+		}
+	}
+	h.voiceRooms[channelID][client.userID] = &VoiceMember{UserID: client.userID, Username: client.username}
+	return existing
+}
+
+func (h *Hub) leaveVoice(client *Client, channelID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.voiceRooms[channelID], client.userID)
+	if len(h.voiceRooms[channelID]) == 0 {
+		delete(h.voiceRooms, channelID)
+	}
+}
+
 func (h *Hub) removeClient(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -145,6 +182,10 @@ func (h *Hub) removeClient(client *Client) {
 	}
 	for room := range client.rooms {
 		delete(h.rooms[room], client)
+		delete(h.voiceRooms[room], client.userID)
+		if len(h.voiceRooms[room]) == 0 {
+			delete(h.voiceRooms, room)
+		}
 		if len(h.rooms[room]) == 0 {
 			delete(h.rooms, room)
 		}
@@ -175,11 +216,23 @@ func (c *Client) readPump() {
 				c.hub.join(c, msg.ChannelID)
 				c.send <- Envelope{Type: "channel_joined", ChannelID: msg.ChannelID}
 			}
+		case "voice_join":
+			if c.rooms[msg.ChannelID] {
+				existing := c.hub.joinVoice(c, msg.ChannelID)
+				payload, _ := json.Marshal(existing)
+				c.send <- Envelope{Type: "voice_members", ChannelID: msg.ChannelID, Payload: payload}
+				c.hub.Publish(msg)
+			}
+		case "voice_leave":
+			if c.rooms[msg.ChannelID] {
+				c.hub.leaveVoice(c, msg.ChannelID)
+				c.hub.Publish(msg)
+			}
 		case "voice_signal":
 			if c.rooms[msg.ChannelID] {
 				c.hub.PublishToUser(msg.TargetID, msg)
 			}
-		case "voice_join", "voice_leave", "typing":
+		case "typing":
 			if c.rooms[msg.ChannelID] {
 				c.hub.Publish(msg)
 			}

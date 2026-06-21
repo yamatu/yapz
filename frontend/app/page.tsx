@@ -23,7 +23,7 @@ import {
 
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
 import { cn } from "@/lib/utils";
-import { api } from "@/lib/api";
+import { api, rtcIceServers } from "@/lib/api";
 import type { AdminChannel, AdminServer, AdminUser, Channel, Member, Message, Server, User } from "@/types/domain";
 
 type AuthMode = "login" | "register";
@@ -55,6 +55,8 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const micGainRef = useRef<GainNode | null>(null);
   const peersRef = useRef<Record<string, RTCPeerConnection>>({});
+  const pendingVoiceJoinRef = useRef<string | null>(null);
+  const voiceChannelRef = useRef<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const loadServers = useCallback(async () => {
@@ -139,6 +141,10 @@ export default function Home() {
   }, [token]);
 
   useEffect(() => {
+    voiceChannelRef.current = voiceChannelId;
+  }, [voiceChannelId]);
+
+  useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN && activeChannelId) {
       wsRef.current.send(JSON.stringify({ type: "join_channel", channelId: activeChannelId }));
     }
@@ -215,7 +221,7 @@ export default function Home() {
     if (peersRef.current[targetID]) return peersRef.current[targetID];
     const stream = processedLocalStreamRef.current;
     if (!stream) throw new Error("missing local stream");
-    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const peer = new RTCPeerConnection({ iceServers: rtcIceServers() });
     stream.getTracks().forEach((track) => peer.addTrack(track, stream));
     peer.onicecandidate = (event) => {
       if (event.candidate) sendVoiceSignal(channelID, targetID, { kind: "ice", candidate: event.candidate });
@@ -226,6 +232,14 @@ export default function Home() {
     };
     peersRef.current[targetID] = peer;
     return peer;
+  }
+
+  async function sendOffer(targetID: string, targetName: string, channelID: string) {
+    const peer = await ensurePeer(targetID, targetName, channelID);
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+    sendVoiceSignal(channelID, targetID, { kind: "offer", description: offer });
+    setVoiceMembers((prev) => ({ ...prev, [targetID]: targetName }));
   }
 
   useEffect(() => {
@@ -253,13 +267,20 @@ export default function Home() {
     ws.onmessage = async (event) => {
       original?.call(ws, event);
       const envelope = JSON.parse(event.data);
-      if (!activeChannelId || envelope.channelId !== activeChannelId) return;
-      if (envelope.type === "voice_join" && envelope.userId !== user.id && localStreamRef.current) {
+      const currentVoiceChannel = voiceChannelRef.current;
+      if (envelope.type === "channel_joined" && pendingVoiceJoinRef.current === envelope.channelId) {
+        pendingVoiceJoinRef.current = null;
+        wsRef.current?.send(JSON.stringify({ type: "voice_join", channelId: envelope.channelId }));
+      }
+      if (!currentVoiceChannel || envelope.channelId !== currentVoiceChannel) return;
+      if (envelope.type === "voice_members" && processedLocalStreamRef.current) {
+        const existing = (envelope.payload ?? []) as Array<{ userId: string; username: string }>;
+        for (const member of existing) {
+          if (member.userId !== user.id) await sendOffer(member.userId, member.username, currentVoiceChannel);
+        }
+      }
+      if (envelope.type === "voice_join" && envelope.userId !== user.id) {
         playJoinTone();
-        const peer = await ensurePeer(envelope.userId, envelope.username, activeChannelId);
-        const offer = await peer.createOffer();
-        await peer.setLocalDescription(offer);
-        sendVoiceSignal(activeChannelId, envelope.userId, { kind: "offer", description: offer });
         setVoiceMembers((prev) => ({ ...prev, [envelope.userId]: envelope.username }));
       }
       if (envelope.type === "voice_leave") {
@@ -278,12 +299,12 @@ export default function Home() {
       }
       if (envelope.type === "voice_signal" && envelope.userId !== user.id && processedLocalStreamRef.current) {
         const payload = envelope.payload;
-        const peer = await ensurePeer(envelope.userId, envelope.username, activeChannelId);
+        const peer = await ensurePeer(envelope.userId, envelope.username, currentVoiceChannel);
         if (payload.kind === "offer") {
           await peer.setRemoteDescription(payload.description);
           const answer = await peer.createAnswer();
           await peer.setLocalDescription(answer);
-          sendVoiceSignal(activeChannelId, envelope.userId, { kind: "answer", description: answer });
+          sendVoiceSignal(currentVoiceChannel, envelope.userId, { kind: "answer", description: answer });
         }
         if (payload.kind === "answer") await peer.setRemoteDescription(payload.description);
         if (payload.kind === "ice") await peer.addIceCandidate(payload.candidate);
@@ -292,7 +313,7 @@ export default function Home() {
     return () => {
       if (ws.onmessage !== original) ws.onmessage = original;
     };
-  }, [activeChannelId, token, user]);
+  }, [token, user]);
 
   if (!authReady) return <LoadingScreen />;
   if (!token || !user) return <AuthScreen onAuthed={handleAuth} />;
@@ -403,7 +424,8 @@ export default function Home() {
                   await prepareLocalAudio();
                   setVoiceChannelId(activeChannel.id);
                   setVoiceMembers({ [user.id]: user.username });
-                  wsRef.current?.send(JSON.stringify({ type: "voice_join", channelId: activeChannel.id }));
+                  pendingVoiceJoinRef.current = activeChannel.id;
+                  wsRef.current?.send(JSON.stringify({ type: "join_channel", channelId: activeChannel.id }));
                   playJoinTone();
                 }}
                 onLeave={() => {
@@ -709,12 +731,15 @@ function LevelMeter({ level }: { level: number }) {
 
 function RemoteAudio({ stream, volume, onLevel }: { stream: MediaStream; volume: number; onLevel: (value: number) => void }) {
   const ref = useRef<HTMLAudioElement | null>(null);
+  const [playBlocked, setPlayBlocked] = useState(false);
   const onLevelRef = useRef(onLevel);
   useEffect(() => {
     onLevelRef.current = onLevel;
   }, [onLevel]);
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    if (!ref.current) return;
+    ref.current.srcObject = stream;
+    ref.current.play().then(() => setPlayBlocked(false)).catch(() => setPlayBlocked(true));
   }, [stream]);
   useEffect(() => {
     if (ref.current) ref.current.volume = Math.min(1, Math.max(0, volume));
@@ -731,7 +756,12 @@ function RemoteAudio({ stream, volume, onLevel }: { stream: MediaStream; volume:
       context.close();
     };
   }, [stream]);
-  return <audio ref={ref} autoPlay playsInline />;
+  return (
+    <>
+      <audio ref={ref} autoPlay playsInline />
+      {playBlocked ? <button className="mt-2 rounded-md border border-amber px-3 py-1 text-xs text-amber" onClick={() => ref.current?.play().then(() => setPlayBlocked(false))}>点击恢复远端声音</button> : null}
+    </>
+  );
 }
 
 function MembersPanel({

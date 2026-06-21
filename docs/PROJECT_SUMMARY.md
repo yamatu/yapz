@@ -21,6 +21,7 @@
 - shadcn-style local UI primitives for buttons, cards, inputs, labels, and badges.
 - Server owners can remove members; members can leave servers themselves.
 - Voice channels now use browser WebRTC microphone audio with DTLS-SRTP encrypted media transport.
+- Public voice calls support configurable ICE servers through `NEXT_PUBLIC_RTC_ICE_URLS`, `NEXT_PUBLIC_RTC_ICE_USERNAME`, and `NEXT_PUBLIC_RTC_ICE_CREDENTIAL`; deploy a TURN server for reliable cross-network audio.
 - Auth bootstrap now shows a loading state instead of flashing the login screen while restoring a saved token.
 
 ## Next Milestones

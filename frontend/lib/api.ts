@@ -66,3 +66,15 @@ export const api = {
   deleteAdminChannel: (token: string, channelId: string) =>
     request<{ status: string }>(`/api/admin/channels/${channelId}`, token, { method: "DELETE" })
 };
+
+export function rtcIceServers(): RTCIceServer[] {
+  const urls = process.env.NEXT_PUBLIC_RTC_ICE_URLS?.split(",").map((item) => item.trim()).filter(Boolean);
+  if (!urls?.length) return [{ urls: "stun:stun.l.google.com:19302" }];
+  return [
+    {
+      urls,
+      username: process.env.NEXT_PUBLIC_RTC_ICE_USERNAME,
+      credential: process.env.NEXT_PUBLIC_RTC_ICE_CREDENTIAL
+    }
+  ];
+}
