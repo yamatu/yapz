@@ -90,6 +90,7 @@ export default function Home() {
     api
       .me(token)
       .then((nextUser) => {
+        userRef.current = nextUser;
         setUser(nextUser);
         setAuthReady(true);
       })
@@ -258,6 +259,7 @@ export default function Home() {
 
   function handleAuth(nextToken: string, nextUser: User) {
     window.localStorage.setItem("yapz_token", nextToken);
+    userRef.current = nextUser;
     setToken(nextToken);
     setUser(nextUser);
   }
@@ -265,6 +267,8 @@ export default function Home() {
   function logout() {
     window.localStorage.removeItem("yapz_token");
     wsRef.current?.close();
+    voiceChannelRef.current = null;
+    userRef.current = null;
     setToken(null);
     setUser(null);
     setServers([]);
@@ -485,6 +489,7 @@ export default function Home() {
                     return;
                   }
                   await prepareLocalAudio();
+                  voiceChannelRef.current = selectedVoiceChannel.id;
                   setVoiceChannelId(selectedVoiceChannel.id);
                   setVoiceMembers({ [user.id]: user.username });
                   pendingVoiceJoinRef.current = selectedVoiceChannel.id;
@@ -493,6 +498,7 @@ export default function Home() {
                 }}
                 onLeave={() => {
                   wsRef.current?.send(JSON.stringify({ type: "voice_leave", channelId: selectedVoiceChannel.id }));
+                  voiceChannelRef.current = null;
                   setVoiceChannelId(null);
                   closeVoice();
                 }}

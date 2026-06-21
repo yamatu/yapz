@@ -40,6 +40,7 @@ type Client struct {
 	username string
 	rooms    map[string]bool
 	servers  map[string]bool
+	voice    string
 }
 
 type Envelope struct {
@@ -162,9 +163,21 @@ func (h *Hub) joinServer(client *Client, serverID string) {
 	client.servers[serverID] = true
 }
 
-func (h *Hub) joinVoice(client *Client, channelID string) []VoiceMember {
+func (h *Hub) joinVoice(client *Client, channelID string) ([]VoiceMember, string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	oldVoice := client.voice
+	if oldVoice != "" && oldVoice != channelID {
+		delete(h.voiceRooms[oldVoice], client.userID)
+		if len(h.voiceRooms[oldVoice]) == 0 {
+			delete(h.voiceRooms, oldVoice)
+		}
+		delete(h.rooms[oldVoice], client)
+		delete(client.rooms, oldVoice)
+		if len(h.rooms[oldVoice]) == 0 {
+			delete(h.rooms, oldVoice)
+		}
+	}
 	if h.rooms[channelID] == nil {
 		h.rooms[channelID] = map[*Client]bool{}
 	}
@@ -180,13 +193,20 @@ func (h *Hub) joinVoice(client *Client, channelID string) []VoiceMember {
 		}
 	}
 	h.voiceRooms[channelID][client.userID] = &VoiceMember{UserID: client.userID, Username: client.username}
-	return existing
+	client.voice = channelID
+	if oldVoice == channelID {
+		oldVoice = ""
+	}
+	return existing, oldVoice
 }
 
 func (h *Hub) leaveVoice(client *Client, channelID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.voiceRooms[channelID], client.userID)
+	if client.voice == channelID {
+		client.voice = ""
+	}
 	if len(h.voiceRooms[channelID]) == 0 {
 		delete(h.voiceRooms, channelID)
 	}
@@ -280,7 +300,10 @@ func (c *Client) readPump() {
 			}
 		case "voice_join":
 			if c.rooms[msg.ChannelID] {
-				existing := c.hub.joinVoice(c, msg.ChannelID)
+				existing, oldVoice := c.hub.joinVoice(c, msg.ChannelID)
+				if oldVoice != "" {
+					c.hub.Publish(Envelope{Type: "voice_leave", ChannelID: oldVoice, UserID: c.userID, Username: c.username})
+				}
 				payload, _ := json.Marshal(existing)
 				c.send <- Envelope{Type: "voice_members", ChannelID: msg.ChannelID, Payload: payload}
 				c.hub.Publish(msg)
