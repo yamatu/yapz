@@ -40,6 +40,7 @@ func NewRouter(cfg config.Config, st *store.Store, hub *realtime.Hub) http.Handl
 	mux.Handle("GET /api/servers/{serverID}/invite", api.authenticated(http.HandlerFunc(api.getInvite)))
 	mux.Handle("GET /api/servers/{serverID}/channels", api.authenticated(http.HandlerFunc(api.listChannels)))
 	mux.Handle("POST /api/servers/{serverID}/channels", api.authenticated(http.HandlerFunc(api.createChannel)))
+	mux.Handle("PATCH /api/servers/{serverID}/channels/{channelID}", api.authenticated(http.HandlerFunc(api.renameChannel)))
 	mux.Handle("DELETE /api/servers/{serverID}/channels/{channelID}", api.authenticated(http.HandlerFunc(api.deleteChannel)))
 	mux.Handle("GET /api/servers/{serverID}/members", api.authenticated(http.HandlerFunc(api.listMembers)))
 	mux.Handle("DELETE /api/servers/{serverID}/members/{memberID}", api.authenticated(http.HandlerFunc(api.removeMember)))
@@ -285,6 +286,26 @@ func (a *API) deleteChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (a *API) renameChannel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "channel name is required")
+		return
+	}
+	channel, err := a.store.RenameChannel(r.Context(), r.PathValue("serverID"), claimsFrom(r).UserID, r.PathValue("channelID"), body.Name)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "could not rename channel")
+		return
+	}
+	writeJSON(w, http.StatusOK, channel)
 }
 
 func (a *API) listMembers(w http.ResponseWriter, r *http.Request) {

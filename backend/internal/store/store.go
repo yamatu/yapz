@@ -18,6 +18,10 @@ type Store struct {
 	db *pgxpool.Pool
 }
 
+type ServerMemberID struct {
+	ServerID string
+}
+
 type User struct {
 	ID        string    `json:"id"`
 	Username  string    `json:"username"`
@@ -134,6 +138,23 @@ func (s *Store) FindUserByID(ctx context.Context, id string) (User, error) {
 func (s *Store) SetUserStatus(ctx context.Context, userID, status string) error {
 	_, err := s.db.Exec(ctx, `UPDATE users SET status = $1 WHERE id = $2`, status, userID)
 	return err
+}
+
+func (s *Store) ListMembershipServerIDs(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.db.Query(ctx, `SELECT server_id FROM server_members WHERE user_id = $1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *Store) EnsureAdmin(ctx context.Context, username, email, password string) error {
@@ -281,6 +302,24 @@ func (s *Store) CreateChannel(ctx context.Context, serverID, userID, name, kind 
 		VALUES ($1, $2, $3, (SELECT COALESCE(MAX(position), 0) + 1 FROM channels WHERE server_id = $1))
 		RETURNING id, server_id, name, kind, position, created_at
 	`, serverID, name, kind).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Kind, &ch.Position, &ch.CreatedAt)
+	return ch, err
+}
+
+func (s *Store) RenameChannel(ctx context.Context, serverID, userID, channelID, name string) (Channel, error) {
+	var role string
+	if err := s.db.QueryRow(ctx, `SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID).Scan(&role); err != nil {
+		return Channel{}, err
+	}
+	if role != "owner" {
+		return Channel{}, errors.New("only owner can rename channels")
+	}
+	var ch Channel
+	err := s.db.QueryRow(ctx, `
+		UPDATE channels
+		SET name = $1
+		WHERE id = $2 AND server_id = $3
+		RETURNING id, server_id, name, kind, position, created_at
+	`, name, channelID, serverID).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Kind, &ch.Position, &ch.CreatedAt)
 	return ch, err
 }
 

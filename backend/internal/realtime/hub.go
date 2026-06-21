@@ -14,16 +14,17 @@ import (
 )
 
 type Hub struct {
-	store      *store.Store
-	register   chan *Client
-	unregister chan *Client
-	broadcast  chan Envelope
-	clients    map[*Client]bool
-	rooms      map[string]map[*Client]bool
-	voiceRooms map[string]map[string]*VoiceMember
-	users      map[string]map[*Client]bool
-	userCounts map[string]int
-	mu         sync.RWMutex
+	store       *store.Store
+	register    chan *Client
+	unregister  chan *Client
+	broadcast   chan Envelope
+	clients     map[*Client]bool
+	rooms       map[string]map[*Client]bool
+	serverRooms map[string]map[*Client]bool
+	voiceRooms  map[string]map[string]*VoiceMember
+	users       map[string]map[*Client]bool
+	userCounts  map[string]int
+	mu          sync.RWMutex
 }
 
 type VoiceMember struct {
@@ -38,6 +39,7 @@ type Client struct {
 	userID   string
 	username string
 	rooms    map[string]bool
+	servers  map[string]bool
 }
 
 type Envelope struct {
@@ -56,15 +58,16 @@ var upgrader = websocket.Upgrader{
 
 func NewHub(store *store.Store) *Hub {
 	return &Hub{
-		store:      store,
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan Envelope, 256),
-		clients:    map[*Client]bool{},
-		rooms:      map[string]map[*Client]bool{},
-		voiceRooms: map[string]map[string]*VoiceMember{},
-		users:      map[string]map[*Client]bool{},
-		userCounts: map[string]int{},
+		store:       store,
+		register:    make(chan *Client),
+		unregister:  make(chan *Client),
+		broadcast:   make(chan Envelope, 256),
+		clients:     map[*Client]bool{},
+		rooms:       map[string]map[*Client]bool{},
+		serverRooms: map[string]map[*Client]bool{},
+		voiceRooms:  map[string]map[string]*VoiceMember{},
+		users:       map[string]map[*Client]bool{},
+		userCounts:  map[string]int{},
 	}
 }
 
@@ -82,6 +85,7 @@ func (h *Hub) Run() {
 			if h.userCounts[client.userID] == 1 {
 				go func() {
 					_ = h.store.SetUserStatus(context.Background(), client.userID, "online")
+					h.publishMemberStatus(client.userID, client.username, "online")
 				}()
 			}
 			h.mu.Unlock()
@@ -114,6 +118,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, userID, username s
 		userID:   userID,
 		username: username,
 		rooms:    map[string]bool{},
+		servers:  map[string]bool{},
 	}
 	h.register <- client
 
@@ -145,6 +150,16 @@ func (h *Hub) join(client *Client, channelID string) {
 	}
 	h.rooms[channelID][client] = true
 	client.rooms[channelID] = true
+}
+
+func (h *Hub) joinServer(client *Client, serverID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.serverRooms[serverID] == nil {
+		h.serverRooms[serverID] = map[*Client]bool{}
+	}
+	h.serverRooms[serverID][client] = true
+	client.servers[serverID] = true
 }
 
 func (h *Hub) joinVoice(client *Client, channelID string) []VoiceMember {
@@ -193,6 +208,7 @@ func (h *Hub) removeClient(client *Client) {
 		delete(h.userCounts, client.userID)
 		go func() {
 			_ = h.store.SetUserStatus(context.Background(), client.userID, "offline")
+			h.publishMemberStatus(client.userID, client.username, "offline")
 		}()
 	}
 	for room := range client.rooms {
@@ -205,8 +221,34 @@ func (h *Hub) removeClient(client *Client) {
 			delete(h.rooms, room)
 		}
 	}
+	for serverID := range client.servers {
+		delete(h.serverRooms[serverID], client)
+		if len(h.serverRooms[serverID]) == 0 {
+			delete(h.serverRooms, serverID)
+		}
+	}
 	close(client.send)
 	_ = client.conn.Close()
+}
+
+func (h *Hub) publishMemberStatus(userID, username, status string) {
+	serverIDs, err := h.store.ListMembershipServerIDs(context.Background(), userID)
+	if err != nil {
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"userId": userID, "username": username, "status": status})
+	for _, serverID := range serverIDs {
+		h.mu.RLock()
+		targets := h.serverRooms[serverID]
+		for client := range targets {
+			select {
+			case client.send <- Envelope{Type: "member_status", ServerID: serverID, UserID: userID, Username: username, Payload: payload}:
+			default:
+				go h.removeClient(client)
+			}
+		}
+		h.mu.RUnlock()
+	}
 }
 
 func (c *Client) readPump() {
@@ -226,6 +268,11 @@ func (c *Client) readPump() {
 		msg.Username = c.username
 
 		switch msg.Type {
+		case "join_server":
+			if ok, err := c.hub.store.IsServerMember(context.Background(), msg.ServerID, c.userID); err == nil && ok {
+				c.hub.joinServer(c, msg.ServerID)
+				c.send <- Envelope{Type: "server_joined", ServerID: msg.ServerID}
+			}
 		case "join_channel":
 			if ok, err := c.hub.store.IsChannelMember(context.Background(), msg.ChannelID, c.userID); err == nil && ok {
 				c.hub.join(c, msg.ChannelID)

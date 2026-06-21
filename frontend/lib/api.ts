@@ -54,6 +54,8 @@ export const api = {
   channels: (token: string, serverId: string) => requestList<Channel>(`/api/servers/${serverId}/channels`, token),
   createChannel: (token: string, serverId: string, body: { name: string; kind: "text" | "voice" }) =>
     request<Channel>(`/api/servers/${serverId}/channels`, token, { method: "POST", body: JSON.stringify(body) }),
+  renameChannel: (token: string, serverId: string, channelId: string, name: string) =>
+    request<Channel>(`/api/servers/${serverId}/channels/${channelId}`, token, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteChannel: (token: string, serverId: string, channelId: string) =>
     request<{ status: string }>(`/api/servers/${serverId}/channels/${channelId}`, token, { method: "DELETE" }),
   members: (token: string, serverId: string) => requestList<Member>(`/api/servers/${serverId}/members`, token),

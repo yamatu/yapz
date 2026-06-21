@@ -37,7 +37,8 @@ export default function Home() {
   const [members, setMembers] = useState<Member[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [activeServerId, setActiveServerId] = useState<string | null>(null);
-  const [activeChannelId, setActiveChannelId] = useState<string | null>(null);
+  const [textChannelId, setTextChannelId] = useState<string | null>(null);
+  const [selectedVoiceChannelId, setSelectedVoiceChannelId] = useState<string | null>(null);
   const [voiceChannelId, setVoiceChannelId] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
   const [status, setStatus] = useState("未连接");
@@ -50,6 +51,7 @@ export default function Home() {
   const [localLevel, setLocalLevel] = useState(0);
   const [inputGain, setInputGain] = useState(1);
   const [outputGain, setOutputGain] = useState(1);
+  const [noiseSuppression, setNoiseSuppression] = useState(true);
   const localStreamRef = useRef<MediaStream | null>(null);
   const processedLocalStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -57,6 +59,7 @@ export default function Home() {
   const peersRef = useRef<Record<string, RTCPeerConnection>>({});
   const pendingVoiceJoinRef = useRef<string | null>(null);
   const voiceChannelRef = useRef<string | null>(null);
+  const textChannelRef = useRef<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const loadServers = useCallback(async () => {
@@ -73,6 +76,10 @@ export default function Home() {
     const saved = window.localStorage.getItem("yapz_token");
     if (saved) setToken(saved);
     else setAuthReady(true);
+    setInputGain(Number(window.localStorage.getItem("yapz_input_gain") ?? "1"));
+    setOutputGain(Number(window.localStorage.getItem("yapz_output_gain") ?? "1"));
+    setNoiseSuppression(window.localStorage.getItem("yapz_noise_suppression") !== "false");
+    setRemoteVolumes(JSON.parse(window.localStorage.getItem("yapz_remote_volumes") ?? "{}"));
   }, []);
 
   useEffect(() => {
@@ -99,23 +106,30 @@ export default function Home() {
       setChannels([]);
       setMembers([]);
       setMessages([]);
-      setActiveChannelId(null);
+      setTextChannelId(null);
+      setSelectedVoiceChannelId(null);
       return;
     }
     Promise.all([api.channels(token, activeServerId), api.members(token, activeServerId)]).then(([channelData, memberData]) => {
       setChannels(channelData);
       setMembers(memberData);
-      setActiveChannelId((current) => (current && channelData.some((ch) => ch.id === current) ? current : channelData[0]?.id ?? null));
+      setTextChannelId((current) => (current && channelData.some((ch) => ch.id === current && ch.kind === "text") ? current : channelData.find((ch) => ch.kind === "text")?.id ?? null));
+      setSelectedVoiceChannelId((current) => (current && channelData.some((ch) => ch.id === current && ch.kind === "voice") ? current : channelData.find((ch) => ch.kind === "voice")?.id ?? null));
+      if (voiceChannelId && !channelData.some((ch) => ch.id === voiceChannelId)) {
+        closeVoice();
+        setVoiceChannelId(null);
+      }
     });
-  }, [activeServerId, token]);
+  }, [activeServerId, token, voiceChannelId]);
 
-  const activeChannel = useMemo(() => channels.find((channel) => channel.id === activeChannelId) ?? null, [activeChannelId, channels]);
+  const activeTextChannel = useMemo(() => channels.find((channel) => channel.id === textChannelId) ?? null, [textChannelId, channels]);
+  const selectedVoiceChannel = useMemo(() => channels.find((channel) => channel.id === selectedVoiceChannelId) ?? null, [selectedVoiceChannelId, channels]);
   const activeServer = useMemo(() => servers.find((server) => server.id === activeServerId) ?? null, [activeServerId, servers]);
 
   useEffect(() => {
-    if (!token || !activeChannelId) return;
-    api.messages(token, activeChannelId).then(setMessages).catch(() => setMessages([]));
-  }, [activeChannelId, token]);
+    if (!token || !textChannelId) return;
+    api.messages(token, textChannelId).then(setMessages).catch(() => setMessages([]));
+  }, [textChannelId, token]);
 
   useEffect(() => {
     if (!token) return;
@@ -128,7 +142,9 @@ export default function Home() {
       const envelope = JSON.parse(event.data);
       if (envelope.type === "message_created" && envelope.payload) {
         const msg = envelope.payload as Message;
-        setMessages((prev) => (prev.some((item) => item.id === msg.id) ? prev : [...prev, msg]));
+        if (msg.channelId === textChannelRef.current) {
+          setMessages((prev) => (prev.some((item) => item.id === msg.id) ? prev : [...prev, msg]));
+        }
       }
       if (envelope.type === "voice_join" && envelope.username) setStatus(`${envelope.username} 加入语音`);
       if (envelope.type === "voice_leave" && envelope.username) setStatus(`${envelope.username} 离开语音`);
@@ -136,19 +152,49 @@ export default function Home() {
         void loadServers();
         window.alert("你已被移出该服务器");
       }
+      if (envelope.type === "member_status" && envelope.serverId === activeServerId && envelope.payload) {
+        const payload = envelope.payload as { userId: string; status: string };
+        setMembers((prev) => prev.map((member) => (member.id === payload.userId ? { ...member, status: payload.status } : member)));
+      }
     };
     return () => ws.close();
-  }, [token]);
+  }, [activeServerId, loadServers, token]);
 
   useEffect(() => {
     voiceChannelRef.current = voiceChannelId;
   }, [voiceChannelId]);
 
   useEffect(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN && activeChannelId) {
-      wsRef.current.send(JSON.stringify({ type: "join_channel", channelId: activeChannelId }));
+    textChannelRef.current = textChannelId;
+  }, [textChannelId]);
+
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && activeServerId) {
+      wsRef.current.send(JSON.stringify({ type: "join_server", serverId: activeServerId }));
     }
-  }, [activeChannelId, status]);
+  }, [activeServerId, status]);
+
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && textChannelId) {
+      wsRef.current.send(JSON.stringify({ type: "join_channel", channelId: textChannelId }));
+    }
+  }, [textChannelId, status]);
+
+  useEffect(() => {
+    window.localStorage.setItem("yapz_input_gain", String(inputGain));
+  }, [inputGain]);
+
+  useEffect(() => {
+    window.localStorage.setItem("yapz_output_gain", String(outputGain));
+  }, [outputGain]);
+
+  useEffect(() => {
+    window.localStorage.setItem("yapz_noise_suppression", String(noiseSuppression));
+  }, [noiseSuppression]);
+
+  useEffect(() => {
+    window.localStorage.setItem("yapz_remote_volumes", JSON.stringify(remoteVolumes));
+  }, [remoteVolumes]);
 
   function handleAuth(nextToken: string, nextUser: User) {
     window.localStorage.setItem("yapz_token", nextToken);
@@ -198,7 +244,7 @@ export default function Home() {
   }
 
   async function prepareLocalAudio() {
-    const sourceStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+    const sourceStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression, autoGainControl: true }, video: false });
     const context = audioContextRef.current ?? new AudioContext();
     audioContextRef.current = context;
     await context.resume();
@@ -356,8 +402,8 @@ export default function Home() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-4">
-          <ChannelGroup title="文字频道" kind="text" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
-          <ChannelGroup title="语音频道" kind="voice" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
+          <ChannelGroup title="文字频道" kind="text" channels={channels} activeChannelId={textChannelId} onSelect={setTextChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onRenamed={(channel) => setChannels((prev) => prev.map((item) => (item.id === channel.id ? channel : item)))} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
+          <ChannelGroup title="语音频道" kind="voice" channels={channels} activeChannelId={selectedVoiceChannelId} onSelect={setSelectedVoiceChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onRenamed={(channel) => setChannels((prev) => prev.map((item) => (item.id === channel.id ? channel : item)))} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
         </div>
 
         <div className="border-t border-line bg-[#171a21] p-3">
@@ -391,10 +437,10 @@ export default function Home() {
           <section className="flex min-h-[58vh] min-w-0 flex-1 flex-col lg:min-h-0">
             <header className="flex h-16 items-center justify-between border-b border-line bg-[#181b22] px-5">
               <div className="flex items-center gap-3">
-                {activeChannel?.kind === "voice" ? <Volume2 className="text-mint" size={22} /> : <Hash className="text-zinc-500" size={22} />}
+                <Hash className="text-zinc-500" size={22} />
                 <div>
-                  <h2 className="text-base font-semibold">{activeChannel?.name ?? "暂无频道"}</h2>
-                  <p className="text-xs text-zinc-500">{activeChannel?.kind === "voice" ? "语音频道" : "文字频道"}</p>
+                  <h2 className="text-base font-semibold">{activeTextChannel?.name ?? "暂无文字频道"}</h2>
+                  <p className="text-xs text-zinc-500">{selectedVoiceChannel ? `语音：${selectedVoiceChannel.name}` : "文字频道"}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2 text-sm text-zinc-400">
@@ -402,19 +448,25 @@ export default function Home() {
                 <span>{activeServer?.role === "owner" ? "服务器拥有者" : "成员"}</span>
               </div>
             </header>
-            {activeChannel?.kind === "voice" ? (
-              <VoicePanel
-                channel={activeChannel}
+            <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+              <div className="flex min-h-[420px] min-w-0 flex-1 flex-col">
+                <ChatPanel token={token} channel={activeTextChannel} messages={messages} />
+              </div>
+              {selectedVoiceChannel ? (
+                <VoicePanel
+                channel={selectedVoiceChannel}
                 user={user}
-                joined={voiceChannelId === activeChannel.id}
+                joined={voiceChannelId === selectedVoiceChannel.id}
                 muted={muted}
                 members={voiceMembers}
                 remoteStreams={remoteStreams}
                 remoteVolumes={remoteVolumes}
                 inputGain={inputGain}
                 outputGain={outputGain}
+                noiseSuppression={noiseSuppression}
                 onInputGain={setInputGain}
                 onOutputGain={setOutputGain}
+                onNoiseSuppression={setNoiseSuppression}
                 onRemoteVolume={(id, value) => setRemoteVolumes((prev) => ({ ...prev, [id]: value }))}
                 onRemoteLevel={(id, value) => setRemoteLevels((prev) => ({ ...prev, [id]: value }))}
                 localLevel={localLevel}
@@ -422,21 +474,20 @@ export default function Home() {
                 onToggleMute={() => setMuted((value) => !value)}
                 onJoin={async () => {
                   await prepareLocalAudio();
-                  setVoiceChannelId(activeChannel.id);
+                  setVoiceChannelId(selectedVoiceChannel.id);
                   setVoiceMembers({ [user.id]: user.username });
-                  pendingVoiceJoinRef.current = activeChannel.id;
-                  wsRef.current?.send(JSON.stringify({ type: "join_channel", channelId: activeChannel.id }));
+                  pendingVoiceJoinRef.current = selectedVoiceChannel.id;
+                  wsRef.current?.send(JSON.stringify({ type: "join_channel", channelId: selectedVoiceChannel.id }));
                   playJoinTone();
                 }}
                 onLeave={() => {
-                  wsRef.current?.send(JSON.stringify({ type: "voice_leave", channelId: activeChannel.id }));
+                  wsRef.current?.send(JSON.stringify({ type: "voice_leave", channelId: selectedVoiceChannel.id }));
                   setVoiceChannelId(null);
                   closeVoice();
                 }}
               />
-            ) : (
-              <ChatPanel token={token} channel={activeChannel} messages={messages} />
-            )}
+              ) : null}
+            </div>
           </section>
           <MembersPanel members={members} currentUser={user} activeServer={activeServer} onKick={removeMember} onLeave={leaveServer} />
         </>
@@ -559,6 +610,7 @@ function ChannelGroup(props: {
   token: string;
   server: Server | null;
   onCreated: (channel: Channel) => void;
+  onRenamed: (channel: Channel) => void;
   onDeleted: (channelID: string) => void;
 }) {
   const list = props.channels.filter((channel) => channel.kind === props.kind);
@@ -580,6 +632,14 @@ function ChannelGroup(props: {
     props.onDeleted(channel.id);
   }
 
+  async function renameChannel(channel: Channel) {
+    if (!props.server) return;
+    const name = window.prompt("新的频道名称", channel.name);
+    if (!name || name === channel.name) return;
+    const updated = await api.renameChannel(props.token, props.server.id, channel.id, name);
+    props.onRenamed(updated);
+  }
+
   return (
     <div className="mb-6">
       <div className="mb-2 flex items-center justify-between px-1 text-xs font-semibold uppercase text-zinc-500">
@@ -596,7 +656,12 @@ function ChannelGroup(props: {
               {channel.kind === "voice" ? <Volume2 size={17} /> : <Hash size={17} />}
               <span className="truncate">{channel.name}</span>
             </button>
-            {canDelete ? <button title="删除频道" onClick={() => deleteChannel(channel)} className="mr-1 rounded p-1.5 text-zinc-500 opacity-100 hover:bg-coral hover:text-white lg:opacity-0 lg:group-hover:opacity-100"><Trash2 size={15} /></button> : null}
+            {canDelete ? (
+              <div className="mr-1 flex opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
+                <button title="重命名频道" onClick={() => renameChannel(channel)} className="rounded p-1.5 text-zinc-500 hover:bg-rail hover:text-white"><Settings size={15} /></button>
+                <button title="删除频道" onClick={() => deleteChannel(channel)} className="rounded p-1.5 text-zinc-500 hover:bg-coral hover:text-white"><Trash2 size={15} /></button>
+              </div>
+            ) : null}
           </div>
         ))}
       </div>
@@ -675,8 +740,10 @@ function VoicePanel(props: {
   localLevel: number;
   inputGain: number;
   outputGain: number;
+  noiseSuppression: boolean;
   onInputGain: (value: number) => void;
   onOutputGain: (value: number) => void;
+  onNoiseSuppression: (value: boolean) => void;
   onRemoteVolume: (id: string, value: number) => void;
   onRemoteLevel: (id: string, value: number) => void;
   onJoin: () => void;
@@ -685,7 +752,7 @@ function VoicePanel(props: {
 }) {
   const remoteEntries = Object.entries(props.remoteStreams);
   return (
-    <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8 text-center sm:px-8">
+    <div className="flex flex-col items-center justify-center overflow-y-auto border-t border-line px-4 py-6 text-center lg:w-[380px] lg:border-l lg:border-t-0">
       <div className="grid h-24 w-24 place-items-center rounded-xl bg-rail text-mint"><Headphones size={48} /></div>
       <h2 className="mt-6 text-2xl font-bold">{props.channel.name}</h2>
       <p className="mt-2 max-w-[560px] text-sm leading-6 text-zinc-400">语音使用浏览器 WebRTC 传输，媒体流默认通过 DTLS-SRTP 加密；服务器只转发信令，不接触音频内容。</p>
@@ -699,6 +766,11 @@ function VoicePanel(props: {
             <VolumeControl label="我的麦克风音量" value={props.inputGain} onChange={props.onInputGain} />
             <VolumeControl label="听筒总音量" value={props.outputGain} onChange={props.onOutputGain} />
           </div>
+          <label className="mt-4 flex items-center justify-between rounded-md border border-line bg-[#11151d] px-3 py-2 text-sm text-zinc-300">
+            <span>浏览器降噪</span>
+            <input type="checkbox" checked={props.noiseSuppression} onChange={(event) => props.onNoiseSuppression(event.target.checked)} className="h-4 w-4 accent-mint" />
+          </label>
+          <p className="mt-2 text-xs text-zinc-500">降噪、回声消除和自动增益由浏览器处理，切换后下次加入语音生效。</p>
         </Card>
       ) : null}
       <div className="mt-6 grid w-full max-w-[720px] grid-cols-1 gap-3 sm:grid-cols-2">
