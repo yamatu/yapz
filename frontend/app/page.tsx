@@ -117,7 +117,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!token) return;
-    const ws = new WebSocket(`${api.url.replace("http", "ws")}/ws?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(api.wsUrl(token));
     wsRef.current = ws;
     ws.onopen = () => setStatus("在线");
     ws.onclose = () => setStatus("已断开");

@@ -45,20 +45,11 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: yapz-frontend
-    environment:
-      WATCHPACK_POLLING: "true"
     ports:
       - "3000:3000"
     depends_on:
       - backend
-    volumes:
-      - ./frontend:/app
-      - yapz-node-modules:/app/node_modules
-      - yapz-next-cache:/app/.next
-    command: npm run dev -- --hostname 0.0.0.0
 
 volumes:
   yapz-postgres:
   yapz-go-cache:
-  yapz-node-modules:
-  yapz-next-cache:

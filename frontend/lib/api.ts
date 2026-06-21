@@ -1,11 +1,7 @@
 import type { AdminChannel, AdminServer, AdminUser, Channel, Invite, Member, Message, Server, User } from "@/types/domain";
 
 const configuredURL = process.env.NEXT_PUBLIC_API_URL;
-const API_URL =
-  configuredURL ??
-  (typeof window === "undefined"
-    ? "http://localhost:8080"
-    : `${window.location.protocol}//${window.location.hostname}:8080`);
+const API_URL = configuredURL ?? "";
 
 type AuthResponse = {
   token: string;
@@ -35,6 +31,13 @@ async function requestList<T>(path: string, token: string): Promise<T[]> {
 
 export const api = {
   url: API_URL,
+  wsUrl: (token: string) => {
+    if (configuredURL) {
+      return `${configuredURL.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(token)}`;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
+  },
   register: (body: { username: string; email: string; password: string }) =>
     request<AuthResponse>("/api/auth/register", null, { method: "POST", body: JSON.stringify(body) }),
   login: (body: { login: string; password: string }) =>
