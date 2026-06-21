@@ -46,6 +46,8 @@ Default admin account:
 - Email: `admin@yapz.local`
 - Password: `Admin123456`
 
+The backend seeds this account on startup. Override `ADMIN_EMAIL`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` in `docker-compose.yml` or your deployment environment to configure your own administrator account; the configured password is re-applied on each backend start.
+
 ## Default Environment
 
 Backend defaults:

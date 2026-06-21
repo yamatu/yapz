@@ -320,7 +320,7 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen bg-ink text-zinc-100 max-lg:flex-col lg:h-screen">
-      <aside className="flex border-r border-line bg-[#14171d] p-3 max-lg:w-full max-lg:flex-row lg:w-[76px] lg:flex-col lg:items-center lg:gap-3 lg:py-4">
+      <aside className="flex border-r border-line bg-[#14171d] p-3 max-lg:w-full max-lg:flex-row max-lg:gap-3 max-lg:overflow-x-auto lg:w-[76px] lg:flex-col lg:items-center lg:gap-3 lg:py-4">
         <Button title="聊天主页" onClick={() => setView("chat")} className="h-12 w-12 p-0">
           <Gamepad2 size={24} />
         </Button>
@@ -344,7 +344,7 @@ export default function Home() {
         <CreateServerButton token={token} onCreated={loadServers} />
       </aside>
 
-      <aside className="flex flex-col border-r border-line bg-panel max-lg:w-full lg:w-[306px]">
+      <aside className="flex flex-col border-r border-line bg-panel max-lg:max-h-[42vh] max-lg:w-full lg:w-[306px]">
         <div className="border-b border-line px-4 py-4">
           <p className="text-xs uppercase text-zinc-500">当前服务器</p>
           <h1 className="mt-1 truncate text-lg font-semibold">{activeServer?.name ?? "创建或加入服务器"}</h1>
@@ -356,8 +356,8 @@ export default function Home() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-4">
-          <ChannelGroup title="文字频道" kind="text" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} serverId={activeServerId} onCreated={(channel) => setChannels((prev) => [...prev, channel])} />
-          <ChannelGroup title="语音频道" kind="voice" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} serverId={activeServerId} onCreated={(channel) => setChannels((prev) => [...prev, channel])} />
+          <ChannelGroup title="文字频道" kind="text" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
+          <ChannelGroup title="语音频道" kind="voice" channels={channels} activeChannelId={activeChannelId} onSelect={setActiveChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
         </div>
 
         <div className="border-t border-line bg-[#171a21] p-3">
@@ -388,7 +388,7 @@ export default function Home() {
         <AdminView token={token} />
       ) : (
         <>
-          <section className="flex min-h-[70vh] min-w-0 flex-1 flex-col">
+          <section className="flex min-h-[58vh] min-w-0 flex-1 flex-col lg:min-h-0">
             <header className="flex h-16 items-center justify-between border-b border-line bg-[#181b22] px-5">
               <div className="flex items-center gap-3">
                 {activeChannel?.kind === "voice" ? <Volume2 className="text-mint" size={22} /> : <Hash className="text-zinc-500" size={22} />}
@@ -532,6 +532,7 @@ function AuthScreen({ onAuthed }: { onAuthed: (token: string, user: User) => voi
           )}
           {mode === "login" && <Field name="login" label="用户名或邮箱" placeholder="admin@yapz.local" />}
           <Field name="password" label="密码" type="password" placeholder="至少 8 位" />
+          <p className="text-xs text-zinc-500">默认管理员：admin@yapz.local / Admin123456，可通过 Docker 环境变量覆盖。</p>
           {error && <p className="rounded-md border border-coral/50 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</p>}
           <Button disabled={loading} className="w-full">{loading ? "处理中..." : mode === "login" ? "进入 Yapz" : "创建账号"}</Button>
         </form>
@@ -556,36 +557,47 @@ function ChannelGroup(props: {
   activeChannelId: string | null;
   onSelect: (id: string) => void;
   token: string;
-  serverId: string | null;
+  server: Server | null;
   onCreated: (channel: Channel) => void;
+  onDeleted: (channelID: string) => void;
 }) {
   const list = props.channels.filter((channel) => channel.kind === props.kind);
   const [creating, setCreating] = useState(false);
-  const disabled = !props.serverId || creating;
+  const disabled = !props.server || creating;
+  const canDelete = props.server?.role === "owner";
 
   async function createChannel() {
-    if (!props.serverId) return;
+    if (!props.server) return;
     const name = window.prompt(`新建${props.kind === "text" ? "文字" : "语音"}频道名称`);
     if (!name) return;
-    const channel = await api.createChannel(props.token, props.serverId, { name, kind: props.kind });
+    const channel = await api.createChannel(props.token, props.server.id, { name, kind: props.kind });
     props.onCreated(channel);
+  }
+
+  async function deleteChannel(channel: Channel) {
+    if (!props.server || !window.confirm(`确定删除频道 ${channel.name}？`)) return;
+    await api.deleteChannel(props.token, props.server.id, channel.id);
+    props.onDeleted(channel.id);
   }
 
   return (
     <div className="mb-6">
       <div className="mb-2 flex items-center justify-between px-1 text-xs font-semibold uppercase text-zinc-500">
         <span>{props.title}</span>
-        <Button title={props.serverId ? "添加频道" : "请先创建或加入服务器"} variant="ghost" disabled={disabled} onClick={async () => { setCreating(true); try { await createChannel(); } finally { setCreating(false); } }} className="h-7 w-7 p-0">
-          <Plus size={15} />
+        <Button title={props.server ? "添加频道" : "请先创建或加入服务器"} variant="secondary" disabled={disabled} onClick={async () => { setCreating(true); try { await createChannel(); } finally { setCreating(false); } }} className="h-10 w-10 p-0">
+          <Plus size={21} />
         </Button>
       </div>
-      {!props.serverId ? <p className="rounded-md border border-dashed border-line px-3 py-2 text-xs text-zinc-500">创建或加入服务器后可添加频道</p> : null}
+      {!props.server ? <p className="rounded-md border border-dashed border-line px-3 py-2 text-xs text-zinc-500">创建或加入服务器后可添加频道</p> : null}
       <div className="space-y-1">
         {list.map((channel) => (
-          <button key={channel.id} onClick={() => props.onSelect(channel.id)} className={cn("flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition", props.activeChannelId === channel.id ? "bg-rail text-white" : "text-zinc-400 hover:bg-[#232831] hover:text-zinc-100")}>
-            {channel.kind === "voice" ? <Volume2 size={17} /> : <Hash size={17} />}
-            <span className="truncate">{channel.name}</span>
-          </button>
+          <div key={channel.id} className={cn("group flex items-center rounded-md transition", props.activeChannelId === channel.id ? "bg-rail text-white" : "text-zinc-400 hover:bg-[#232831] hover:text-zinc-100")}>
+            <button onClick={() => props.onSelect(channel.id)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left text-sm">
+              {channel.kind === "voice" ? <Volume2 size={17} /> : <Hash size={17} />}
+              <span className="truncate">{channel.name}</span>
+            </button>
+            {canDelete ? <button title="删除频道" onClick={() => deleteChannel(channel)} className="mr-1 rounded p-1.5 text-zinc-500 opacity-100 hover:bg-coral hover:text-white lg:opacity-0 lg:group-hover:opacity-100"><Trash2 size={15} /></button> : null}
+          </div>
         ))}
       </div>
     </div>
@@ -788,8 +800,8 @@ function MembersPanel({
       <div className="space-y-2 p-3">
         {members.map((member) => (
           <div key={member.id} className="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-rail">
-            <div className="relative grid h-9 w-9 place-items-center rounded-lg bg-[#2c3340] text-sm font-bold">{member.username[0]?.toUpperCase()}<span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#171a21] bg-mint" /></div>
-            <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{member.username}</p><p className="text-xs text-zinc-500">{member.role}</p></div>
+            <div className="relative grid h-9 w-9 place-items-center rounded-lg bg-[#2c3340] text-sm font-bold">{member.username[0]?.toUpperCase()}<span className={cn("absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#171a21]", member.status === "online" ? "bg-mint" : "bg-coral")} /></div>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{member.username}</p><p className={cn("text-xs", member.status === "online" ? "text-mint" : "text-coral")}>{member.status === "online" ? "在线" : "离线"} · {member.role}</p></div>
             {canKick && member.id !== currentUser.id && member.role !== "owner" ? (
               <Button title="踢出成员" variant="ghost" onClick={() => onKick(member.id)} className="h-8 w-8 p-0 text-coral"><UserMinus size={15} /></Button>
             ) : null}

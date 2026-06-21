@@ -22,6 +22,7 @@ type Hub struct {
 	rooms      map[string]map[*Client]bool
 	voiceRooms map[string]map[string]*VoiceMember
 	users      map[string]map[*Client]bool
+	userCounts map[string]int
 	mu         sync.RWMutex
 }
 
@@ -63,6 +64,7 @@ func NewHub(store *store.Store) *Hub {
 		rooms:      map[string]map[*Client]bool{},
 		voiceRooms: map[string]map[string]*VoiceMember{},
 		users:      map[string]map[*Client]bool{},
+		userCounts: map[string]int{},
 	}
 }
 
@@ -76,6 +78,12 @@ func (h *Hub) Run() {
 				h.users[client.userID] = map[*Client]bool{}
 			}
 			h.users[client.userID][client] = true
+			h.userCounts[client.userID]++
+			if h.userCounts[client.userID] == 1 {
+				go func() {
+					_ = h.store.SetUserStatus(context.Background(), client.userID, "online")
+				}()
+			}
 			h.mu.Unlock()
 		case client := <-h.unregister:
 			h.removeClient(client)
@@ -179,6 +187,13 @@ func (h *Hub) removeClient(client *Client) {
 	delete(h.users[client.userID], client)
 	if len(h.users[client.userID]) == 0 {
 		delete(h.users, client.userID)
+	}
+	h.userCounts[client.userID]--
+	if h.userCounts[client.userID] <= 0 {
+		delete(h.userCounts, client.userID)
+		go func() {
+			_ = h.store.SetUserStatus(context.Background(), client.userID, "offline")
+		}()
 	}
 	for room := range client.rooms {
 		delete(h.rooms[room], client)

@@ -131,6 +131,11 @@ func (s *Store) FindUserByID(ctx context.Context, id string) (User, error) {
 	return u, err
 }
 
+func (s *Store) SetUserStatus(ctx context.Context, userID, status string) error {
+	_, err := s.db.Exec(ctx, `UPDATE users SET status = $1 WHERE id = $2`, status, userID)
+	return err
+}
+
 func (s *Store) EnsureAdmin(ctx context.Context, username, email, password string) error {
 	hash, err := auth.HashPassword(password)
 	if err != nil {
@@ -139,7 +144,7 @@ func (s *Store) EnsureAdmin(ctx context.Context, username, email, password strin
 	_, err = s.db.Exec(ctx, `
 		INSERT INTO users (username, email, password_hash, status, role)
 		VALUES ($1, $2, $3, 'online', 'admin')
-		ON CONFLICT (email) DO UPDATE SET role = 'admin'
+		ON CONFLICT (email) DO UPDATE SET username = EXCLUDED.username, password_hash = EXCLUDED.password_hash, role = 'admin'
 	`, username, email, hash)
 	return err
 }
@@ -277,6 +282,24 @@ func (s *Store) CreateChannel(ctx context.Context, serverID, userID, name, kind 
 		RETURNING id, server_id, name, kind, position, created_at
 	`, serverID, name, kind).Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Kind, &ch.Position, &ch.CreatedAt)
 	return ch, err
+}
+
+func (s *Store) DeleteChannel(ctx context.Context, serverID, userID, channelID string) error {
+	var role string
+	if err := s.db.QueryRow(ctx, `SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID).Scan(&role); err != nil {
+		return err
+	}
+	if role != "owner" {
+		return errors.New("only owner can delete channels")
+	}
+	result, err := s.db.Exec(ctx, `DELETE FROM channels WHERE id = $1 AND server_id = $2`, channelID, serverID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return errors.New("channel not found")
+	}
+	return nil
 }
 
 func (s *Store) GetOrCreateInvite(ctx context.Context, serverID, userID string) (Invite, error) {

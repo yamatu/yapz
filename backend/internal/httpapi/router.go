@@ -40,6 +40,7 @@ func NewRouter(cfg config.Config, st *store.Store, hub *realtime.Hub) http.Handl
 	mux.Handle("GET /api/servers/{serverID}/invite", api.authenticated(http.HandlerFunc(api.getInvite)))
 	mux.Handle("GET /api/servers/{serverID}/channels", api.authenticated(http.HandlerFunc(api.listChannels)))
 	mux.Handle("POST /api/servers/{serverID}/channels", api.authenticated(http.HandlerFunc(api.createChannel)))
+	mux.Handle("DELETE /api/servers/{serverID}/channels/{channelID}", api.authenticated(http.HandlerFunc(api.deleteChannel)))
 	mux.Handle("GET /api/servers/{serverID}/members", api.authenticated(http.HandlerFunc(api.listMembers)))
 	mux.Handle("DELETE /api/servers/{serverID}/members/{memberID}", api.authenticated(http.HandlerFunc(api.removeMember)))
 	mux.Handle("POST /api/invites/join", api.authenticated(http.HandlerFunc(api.joinInvite)))
@@ -276,6 +277,14 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, channel)
+}
+
+func (a *API) deleteChannel(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.DeleteChannel(r.Context(), r.PathValue("serverID"), claimsFrom(r).UserID, r.PathValue("channelID")); err != nil {
+		writeError(w, http.StatusForbidden, "could not delete channel")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (a *API) listMembers(w http.ResponseWriter, r *http.Request) {
