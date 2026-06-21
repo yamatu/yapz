@@ -10,6 +10,7 @@ type Config struct {
 	AdminEmail  string
 	AdminUser   string
 	AdminPass   string
+	UploadDir   string
 }
 
 func Load() Config {
@@ -21,6 +22,7 @@ func Load() Config {
 		AdminEmail:  env("ADMIN_EMAIL", "admin@yapz.local"),
 		AdminUser:   env("ADMIN_USERNAME", "admin"),
 		AdminPass:   env("ADMIN_PASSWORD", "Admin123456"),
+		UploadDir:   env("UPLOAD_DIR", "uploads"),
 	}
 }
 

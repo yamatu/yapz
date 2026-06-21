@@ -35,8 +35,36 @@ async function requestList<T>(path: string, token: string): Promise<T[]> {
   return Array.isArray(data) ? data : [];
 }
 
+async function upload<T>(path: string, token: string, form: FormData): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      body: form
+    });
+  } catch {
+    throw new Error("无法连接到服务器，请检查 Nginx 的 /api 和 /ws 反向代理配置");
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  const data = contentType.includes("application/json") ? await res.json().catch(() => ({})) : { error: await res.text().catch(() => "") };
+  if (!res.ok) {
+    throw new Error(data.error || `请求失败 (${res.status})`);
+  }
+  return data as T;
+}
+
 export const api = {
   url: API_URL,
+  assetUrl: (path: string) => {
+    if (/^https?:\/\//.test(path)) return path;
+    if (!API_URL && typeof window !== "undefined" && window.location.port === "3000") {
+      return `${window.location.protocol}//${window.location.hostname}:8080${path}`;
+    }
+    return `${API_URL}${path}`;
+  },
   wsUrl: (token: string) => {
     if (configuredURL) {
       return `${configuredURL.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(token)}`;
@@ -70,9 +98,16 @@ export const api = {
   removeMember: (token: string, serverId: string, memberId: string) =>
     request<{ status: string }>(`/api/servers/${serverId}/members/${memberId}`, token, { method: "DELETE" }),
   messages: (token: string, channelId: string) => requestList<Message>(`/api/channels/${channelId}/messages?limit=80`, token),
-  sendMessage: (token: string, channelId: string, content: string) =>
-    request<Message>(`/api/channels/${channelId}/messages`, token, { method: "POST", body: JSON.stringify({ content }) }),
+  uploadImage: (token: string, file: File) => {
+    const form = new FormData();
+    form.append("image", file);
+    return upload<{ url: string; name: string; size: number }>("/api/uploads/images", token, form);
+  },
+  sendMessage: (token: string, channelId: string, body: { content: string; imageUrl?: string; imageName?: string; imageSize?: number }) =>
+    request<Message>(`/api/channels/${channelId}/messages`, token, { method: "POST", body: JSON.stringify(body) }),
   adminUsers: (token: string) => requestList<AdminUser>("/api/admin/users", token),
+  setUserRole: (token: string, userId: string, role: "user" | "admin") =>
+    request<User>(`/api/admin/users/${userId}/role`, token, { method: "PATCH", body: JSON.stringify({ role }) }),
   adminServers: (token: string) => requestList<AdminServer>("/api/admin/servers", token),
   adminChannels: (token: string) => requestList<AdminChannel>("/api/admin/channels", token),
   deleteAdminChannel: (token: string, channelId: string) =>

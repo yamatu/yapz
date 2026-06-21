@@ -57,6 +57,9 @@ type Message struct {
 	AuthorID  string    `json:"authorId"`
 	Username  string    `json:"username"`
 	Content   string    `json:"content"`
+	ImageURL  *string   `json:"imageUrl"`
+	ImageName *string   `json:"imageName"`
+	ImageSize *int64    `json:"imageSize"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -412,7 +415,7 @@ func (s *Store) JoinByInvite(ctx context.Context, userID, code string) (Server, 
 	return Server{}, errors.New("joined server not found")
 }
 
-func (s *Store) CreateMessage(ctx context.Context, channelID, authorID, content string) (Message, error) {
+func (s *Store) CreateMessage(ctx context.Context, channelID, authorID, content string, imageURL, imageName *string, imageSize *int64) (Message, error) {
 	ok, err := s.IsChannelMember(ctx, channelID, authorID)
 	if err != nil || !ok {
 		if err == nil {
@@ -422,10 +425,10 @@ func (s *Store) CreateMessage(ctx context.Context, channelID, authorID, content 
 	}
 	var msg Message
 	err = s.db.QueryRow(ctx, `
-		INSERT INTO messages (channel_id, author_id, content)
-		VALUES ($1, $2, $3)
-		RETURNING id, channel_id, author_id, (SELECT username FROM users WHERE id = $2), content, created_at
-	`, channelID, authorID, content).Scan(&msg.ID, &msg.ChannelID, &msg.AuthorID, &msg.Username, &msg.Content, &msg.CreatedAt)
+		INSERT INTO messages (channel_id, author_id, content, image_url, image_name, image_size)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, channel_id, author_id, (SELECT username FROM users WHERE id = $2), content, image_url, image_name, image_size, created_at
+	`, channelID, authorID, content, imageURL, imageName, imageSize).Scan(&msg.ID, &msg.ChannelID, &msg.AuthorID, &msg.Username, &msg.Content, &msg.ImageURL, &msg.ImageName, &msg.ImageSize, &msg.CreatedAt)
 	return msg, err
 }
 
@@ -441,7 +444,7 @@ func (s *Store) ListMessages(ctx context.Context, channelID, userID string, limi
 		limit = 50
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT m.id, m.channel_id, m.author_id, u.username, m.content, m.created_at
+		SELECT m.id, m.channel_id, m.author_id, u.username, m.content, m.image_url, m.image_name, m.image_size, m.created_at
 		FROM messages m
 		JOIN users u ON u.id = m.author_id
 		WHERE m.channel_id = $1
@@ -456,7 +459,7 @@ func (s *Store) ListMessages(ctx context.Context, channelID, userID string, limi
 	reversed := make([]Message, 0, limit)
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.ID, &msg.ChannelID, &msg.AuthorID, &msg.Username, &msg.Content, &msg.CreatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.ChannelID, &msg.AuthorID, &msg.Username, &msg.Content, &msg.ImageURL, &msg.ImageName, &msg.ImageSize, &msg.CreatedAt); err != nil {
 			return nil, err
 		}
 		reversed = append(reversed, msg)
@@ -593,6 +596,17 @@ func (s *Store) ListAdminChannels(ctx context.Context) ([]AdminChannel, error) {
 func (s *Store) DeleteChannelAsAdmin(ctx context.Context, channelID string) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM channels WHERE id = $1`, channelID)
 	return err
+}
+
+func (s *Store) SetUserRole(ctx context.Context, userID, role string) (User, error) {
+	var u User
+	err := s.db.QueryRow(ctx, `
+		UPDATE users
+		SET role = $1
+		WHERE id = $2
+		RETURNING id, username, email, avatar_url, status, role, created_at
+	`, role, userID).Scan(&u.ID, &u.Username, &u.Email, &u.AvatarURL, &u.Status, &u.Role, &u.CreatedAt)
+	return u, err
 }
 
 func inviteCode() (string, error) {

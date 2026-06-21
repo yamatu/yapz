@@ -6,6 +6,7 @@ import {
   Gamepad2,
   Hash,
   Headphones,
+  ImagePlus,
   KeyRound,
   Loader2,
   LogOut,
@@ -707,17 +708,38 @@ function InviteButton({ token, server }: { token: string; server: Server | null 
 
 function ChatPanel({ token, channel, messages }: { token: string; channel: Channel | null; messages: Message[] }) {
   const [content, setContent] = useState("");
+  const [image, setImage] = useState<File | null>(null);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages]);
   async function send(event: FormEvent) {
     event.preventDefault();
-    if (!channel || !content.trim()) return;
-    await api.sendMessage(token, channel.id, content.trim());
-    setContent("");
+    if (!channel || (!content.trim() && !image) || sending) return;
+    setSending(true);
+    setError("");
+    try {
+      let uploaded: { url: string; name: string; size: number } | null = null;
+      if (image) uploaded = await api.uploadImage(token, image);
+      await api.sendMessage(token, channel.id, {
+        content: content.trim(),
+        imageUrl: uploaded?.url,
+        imageName: uploaded?.name,
+        imageSize: uploaded?.size
+      });
+      setContent("");
+      setImage(null);
+      if (fileRef.current) fileRef.current.value = "";
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "发送失败");
+    } finally {
+      setSending(false);
+    }
   }
   return (
     <>
-      <div className="flex-1 overflow-y-auto px-6 py-6">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6 max-lg:max-h-[52vh]">
         {messages.length === 0 ? (
           <div className="grid h-full place-items-center text-center text-zinc-500">
             <div><Hash className="mx-auto mb-3" size={34} /><p className="text-lg font-semibold text-zinc-300">这里还没有消息</p><p className="mt-1 text-sm">发送第一条消息开始组队。</p></div>
@@ -727,7 +749,15 @@ function ChatPanel({ token, channel, messages }: { token: string; channel: Chann
             {messages.map((message) => (
               <div key={message.id} className="flex gap-3">
                 <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-rail text-sm font-bold">{message.username[0]?.toUpperCase()}</div>
-                <div><div className="flex items-baseline gap-2"><p className="font-semibold">{message.username}</p><time className="text-xs text-zinc-500">{new Date(message.createdAt).toLocaleString()}</time></div><p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-200">{message.content}</p></div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-baseline gap-2"><p className="font-semibold">{message.username}</p><time className="text-xs text-zinc-500">{new Date(message.createdAt).toLocaleString()}</time></div>
+                  {message.content ? <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-200">{message.content}</p> : null}
+                  {message.imageUrl ? (
+                    <a href={api.assetUrl(message.imageUrl)} target="_blank" rel="noreferrer" className="mt-3 block max-w-[520px] overflow-hidden rounded-md border border-line bg-[#11151d]">
+                      <img src={api.assetUrl(message.imageUrl)} alt={message.imageName ?? "上传图片"} className="max-h-[280px] w-full object-contain sm:max-h-[360px]" />
+                    </a>
+                  ) : null}
+                </div>
               </div>
             ))}
             <div ref={endRef} />
@@ -735,9 +765,13 @@ function ChatPanel({ token, channel, messages }: { token: string; channel: Chann
         )}
       </div>
       <form onSubmit={send} className="border-t border-line bg-[#181b22] p-4">
-        <div className="flex items-center gap-3 rounded-lg border border-line bg-[#101319] px-4 py-2">
+        {image ? <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-line bg-[#101319] px-3 py-2 text-xs text-zinc-400"><span className="truncate">{image.name}</span><button type="button" className="text-coral" onClick={() => { setImage(null); if (fileRef.current) fileRef.current.value = ""; }}>移除</button></div> : null}
+        {error ? <p className="mb-2 text-sm text-coral">{error}</p> : null}
+        <div className="flex items-center gap-2 rounded-lg border border-line bg-[#101319] px-3 py-2">
+          <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="hidden" onChange={(event) => setImage(event.target.files?.[0] ?? null)} />
+          <Button title="上传图片" type="button" variant="secondary" onClick={() => fileRef.current?.click()} className="h-9 w-9 shrink-0 p-0"><ImagePlus size={17} /></Button>
           <input value={content} onChange={(event) => setContent(event.target.value)} placeholder={channel ? `发送消息到 #${channel.name}` : "请选择频道"} className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none" />
-          <Button title="发送" className="h-9 w-9 p-0"><Send size={17} /></Button>
+          <Button title="发送" disabled={sending || !channel || (!content.trim() && !image)} className="h-9 w-9 shrink-0 p-0">{sending ? <Loader2 className="animate-spin" size={17} /> : <Send size={17} />}</Button>
         </div>
       </form>
     </>
@@ -767,8 +801,14 @@ function VoicePanel(props: {
   onToggleMute: () => void;
 }) {
   const remoteEntries = Object.entries(props.remoteStreams);
+  const memberEntries = Object.entries(props.members);
+  const [page, setPage] = useState(1);
+  const pageSize = 6;
+  const pageCount = Math.max(1, Math.ceil(memberEntries.length / pageSize));
+  const visibleMembers = memberEntries.slice((Math.min(page, pageCount) - 1) * pageSize, Math.min(page, pageCount) * pageSize);
+  useEffect(() => setPage((current) => Math.min(current, pageCount)), [pageCount]);
   return (
-    <div className="flex flex-col items-center justify-center overflow-y-auto border-t border-line px-4 py-6 text-center lg:w-[380px] lg:border-l lg:border-t-0">
+    <div className="flex min-h-0 flex-col items-center overflow-y-auto border-t border-line px-4 py-6 text-center lg:w-[380px] lg:border-l lg:border-t-0">
       <div className="grid h-24 w-24 place-items-center rounded-xl bg-rail text-mint"><Headphones size={48} /></div>
       <h2 className="mt-6 text-2xl font-bold">{props.channel.name}</h2>
       <p className="mt-2 max-w-[560px] text-sm leading-6 text-zinc-400">语音使用浏览器 WebRTC 传输，媒体流默认通过 DTLS-SRTP 加密；服务器只转发信令，不接触音频内容。</p>
@@ -789,8 +829,8 @@ function VoicePanel(props: {
           <p className="mt-2 text-xs text-zinc-500">降噪、回声消除和自动增益由浏览器处理，切换后下次加入语音生效。</p>
         </Card>
       ) : null}
-      <div className="mt-6 grid w-full max-w-[720px] grid-cols-1 gap-3 sm:grid-cols-2">
-        {Object.entries(props.members).map(([id, name]) => (
+      <div className="mt-6 grid max-h-[360px] w-full max-w-[720px] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
+        {visibleMembers.map(([id, name]) => (
           <Card key={id} className="p-3 text-left">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -804,6 +844,7 @@ function VoicePanel(props: {
           </Card>
         ))}
       </div>
+      <PaginationControls page={Math.min(page, pageCount)} pageCount={pageCount} onPage={setPage} />
       {remoteEntries.map(([id, stream]) => <RemoteAudio key={id} stream={stream} volume={(props.remoteVolumes[id] ?? 1) * props.outputGain} onLevel={(value) => props.onRemoteLevel(id, value)} />)}
     </div>
   );
@@ -878,15 +919,21 @@ function MembersPanel({
   onLeave: () => Promise<void>;
 }) {
   const canKick = activeServer?.role === "owner";
+  const [page, setPage] = useState(1);
+  const pageSize = 12;
+  const pageCount = Math.max(1, Math.ceil(members.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleMembers = members.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  useEffect(() => setPage((value) => Math.min(value, pageCount)), [pageCount]);
   return (
-    <aside className="border-l border-line bg-[#171a21] max-lg:w-full lg:w-[252px]">
+    <aside className="flex min-h-0 flex-col border-l border-line bg-[#171a21] max-lg:w-full lg:w-[252px]">
       <div className="border-b border-line px-4 py-4">
         <p className="text-xs uppercase text-zinc-500">在线成员</p>
         <p className="mt-1 text-sm text-zinc-300">{members.length} 位成员</p>
         {activeServer && activeServer.role !== "owner" ? <Button variant="secondary" onClick={onLeave} className="mt-3 w-full">退出服务器</Button> : null}
       </div>
-      <div className="space-y-2 p-3">
-        {members.map((member) => (
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+        {visibleMembers.map((member) => (
           <div key={member.id} className="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-rail">
             <div className="relative grid h-9 w-9 place-items-center rounded-lg bg-[#2c3340] text-sm font-bold">{member.username[0]?.toUpperCase()}<span className={cn("absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#171a21]", member.status === "online" ? "bg-mint" : "bg-coral")} /></div>
             <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{member.username}</p><p className={cn("text-xs", member.status === "online" ? "text-mint" : "text-coral")}>{member.status === "online" ? "在线" : "离线"} · {member.role}</p></div>
@@ -895,6 +942,9 @@ function MembersPanel({
             ) : null}
           </div>
         ))}
+      </div>
+      <div className="border-t border-line p-3">
+        <PaginationControls page={currentPage} pageCount={pageCount} onPage={setPage} />
       </div>
     </aside>
   );
@@ -960,6 +1010,10 @@ function AdminView({ token }: { token: string }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [servers, setServers] = useState<AdminServer[]>([]);
   const [channels, setChannels] = useState<AdminChannel[]>([]);
+  const [userPage, setUserPage] = useState(1);
+  const [serverPage, setServerPage] = useState(1);
+  const [channelPage, setChannelPage] = useState(1);
+  const pageSize = 10;
   const load = useCallback(async () => {
     const [u, s, c] = await Promise.all([api.adminUsers(token), api.adminServers(token), api.adminChannels(token)]);
     setUsers(u);
@@ -972,6 +1026,15 @@ function AdminView({ token }: { token: string }) {
     await api.deleteAdminChannel(token, id);
     await load();
   }
+  async function setRole(user: AdminUser, role: "user" | "admin") {
+    if (user.role === role) return;
+    if (!window.confirm(`确定将 ${user.username} 设置为 ${role === "admin" ? "管理员" : "普通用户"}？`)) return;
+    await api.setUserRole(token, user.id, role);
+    await load();
+  }
+  const usersPage = paged(users, userPage, pageSize);
+  const serversPage = paged(servers, serverPage, pageSize);
+  const channelsPage = paged(channels, channelPage, pageSize);
   return (
     <section className="flex-1 overflow-y-auto p-8">
       <h2 className="text-2xl font-bold">管理员控制台</h2>
@@ -981,9 +1044,21 @@ function AdminView({ token }: { token: string }) {
         <Stat label="服务器" value={servers.length} />
         <Stat label="频道" value={channels.length} />
       </div>
-      <Card className="mt-6 p-5"><h3 className="mb-4 font-semibold">账号</h3><div className="space-y-2">{users.map((user) => <Row key={user.id} left={`${user.username} · ${user.email}`} right={<><Badge>{user.role}</Badge><span>{user.serverCount} 个服务器</span></>} />)}</div></Card>
-      <Card className="mt-6 p-5"><h3 className="mb-4 font-semibold">服务器</h3><div className="space-y-2">{servers.map((server) => <Row key={server.id} left={server.name} right={<span>{server.ownerName} · {server.memberCount} 成员 · {server.channelCount} 频道</span>} />)}</div></Card>
-      <Card className="mt-6 p-5"><h3 className="mb-4 font-semibold">频道</h3><div className="space-y-2">{channels.map((channel) => <Row key={channel.id} left={`${channel.serverName} / ${channel.name}`} right={<><Badge>{channel.kind}</Badge><Button variant="destructive" onClick={() => deleteChannel(channel.id)} className="h-8 px-2"><Trash2 size={14} /></Button></>} />)}</div></Card>
+      <Card className="mt-6 p-5">
+        <h3 className="mb-4 font-semibold">账号</h3>
+        <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">{usersPage.items.map((user) => <Row key={user.id} left={`${user.username} · ${user.email}`} right={<><Badge>{user.role}</Badge><span>{user.serverCount} 个服务器</span><Button variant={user.role === "admin" ? "default" : "secondary"} onClick={() => setRole(user, user.role === "admin" ? "user" : "admin")} className="h-8 px-2">{user.role === "admin" ? "取消管理员" : "设为管理员"}</Button></>} />)}</div>
+        <PaginationControls page={usersPage.page} pageCount={usersPage.pageCount} onPage={setUserPage} />
+      </Card>
+      <Card className="mt-6 p-5">
+        <h3 className="mb-4 font-semibold">服务器</h3>
+        <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">{serversPage.items.map((server) => <Row key={server.id} left={server.name} right={<span>{server.ownerName} · {server.memberCount} 成员 · {server.channelCount} 频道</span>} />)}</div>
+        <PaginationControls page={serversPage.page} pageCount={serversPage.pageCount} onPage={setServerPage} />
+      </Card>
+      <Card className="mt-6 p-5">
+        <h3 className="mb-4 font-semibold">频道</h3>
+        <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">{channelsPage.items.map((channel) => <Row key={channel.id} left={`${channel.serverName} / ${channel.name}`} right={<><Badge>{channel.kind}</Badge><Button variant="destructive" onClick={() => deleteChannel(channel.id)} className="h-8 px-2"><Trash2 size={14} /></Button></>} />)}</div>
+        <PaginationControls page={channelsPage.page} pageCount={channelsPage.pageCount} onPage={setChannelPage} />
+      </Card>
     </section>
   );
 }
@@ -993,7 +1068,28 @@ function Stat({ label, value }: { label: string; value: number }) {
 }
 
 function Row({ left, right }: { left: string; right: React.ReactNode }) {
-  return <div className="flex items-center justify-between rounded-md border border-line bg-[#151922] px-3 py-2 text-sm"><span className="truncate">{left}</span><div className="flex shrink-0 items-center gap-2 text-zinc-400">{right}</div></div>;
+  return <div className="flex flex-col gap-2 rounded-md border border-line bg-[#151922] px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="min-w-0 truncate">{left}</span><div className="flex shrink-0 flex-wrap items-center gap-2 text-zinc-400">{right}</div></div>;
+}
+
+function PaginationControls({ page, pageCount, onPage }: { page: number; pageCount: number; onPage: (page: number) => void }) {
+  if (pageCount <= 1) return null;
+  return (
+    <div className="mt-3 flex items-center justify-center gap-2 text-xs text-zinc-400">
+      <Button variant="secondary" disabled={page <= 1} onClick={() => onPage(page - 1)} className="h-8 px-2">上一页</Button>
+      <span>{page} / {pageCount}</span>
+      <Button variant="secondary" disabled={page >= pageCount} onClick={() => onPage(page + 1)} className="h-8 px-2">下一页</Button>
+    </div>
+  );
+}
+
+function paged<T>(items: T[], page: number, pageSize: number) {
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  return {
+    page: currentPage,
+    pageCount,
+    items: items.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  };
 }
 
 function CreateServerButton({ token, onCreated }: { token: string; onCreated: () => Promise<void> }) {

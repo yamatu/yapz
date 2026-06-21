@@ -30,6 +30,7 @@ services:
       ADMIN_EMAIL: admin@yapz.local
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: Admin123456
+      UPLOAD_DIR: /app/uploads
     ports:
       - "8080:8080"
     depends_on:
@@ -37,6 +38,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - yapz-uploads:/app/uploads
       - yapz-go-cache:/go/pkg/mod
     command: go run ./cmd/api
 
@@ -53,3 +55,4 @@ services:
 volumes:
   yapz-postgres:
   yapz-go-cache:
+  yapz-uploads:

@@ -30,6 +30,9 @@ export type Message = {
   authorId: string;
   username: string;
   content: string;
+  imageUrl?: string | null;
+  imageName?: string | null;
+  imageSize?: number | null;
   createdAt: string;
 };
 

@@ -2,9 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -36,6 +41,7 @@ func NewRouter(cfg config.Config, st *store.Store, hub *realtime.Hub) http.Handl
 	mux.Handle("GET /api/me", api.authenticated(http.HandlerFunc(api.me)))
 	mux.Handle("PATCH /api/me", api.authenticated(http.HandlerFunc(api.updateMe)))
 	mux.Handle("POST /api/me/password", api.authenticated(http.HandlerFunc(api.changePassword)))
+	mux.Handle("POST /api/uploads/images", api.authenticated(http.HandlerFunc(api.uploadImage)))
 	mux.Handle("GET /api/servers", api.authenticated(http.HandlerFunc(api.listServers)))
 	mux.Handle("POST /api/servers", api.authenticated(http.HandlerFunc(api.createServer)))
 	mux.Handle("GET /api/servers/{serverID}/invite", api.authenticated(http.HandlerFunc(api.getInvite)))
@@ -49,10 +55,12 @@ func NewRouter(cfg config.Config, st *store.Store, hub *realtime.Hub) http.Handl
 	mux.Handle("GET /api/channels/{channelID}/messages", api.authenticated(http.HandlerFunc(api.listMessages)))
 	mux.Handle("POST /api/channels/{channelID}/messages", api.authenticated(http.HandlerFunc(api.createMessage)))
 	mux.Handle("GET /api/admin/users", api.adminOnly(http.HandlerFunc(api.adminUsers)))
+	mux.Handle("PATCH /api/admin/users/{userID}/role", api.adminOnly(http.HandlerFunc(api.adminSetUserRole)))
 	mux.Handle("GET /api/admin/servers", api.adminOnly(http.HandlerFunc(api.adminServers)))
 	mux.Handle("GET /api/admin/channels", api.adminOnly(http.HandlerFunc(api.adminChannels)))
 	mux.Handle("DELETE /api/admin/channels/{channelID}", api.adminOnly(http.HandlerFunc(api.adminDeleteChannel)))
 	mux.Handle("GET /ws", api.authenticated(http.HandlerFunc(api.websocket)))
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(cfg.UploadDir))))
 
 	return api.cors(mux)
 }
@@ -215,6 +223,69 @@ func (a *API) changePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (a *API) uploadImage(w http.ResponseWriter, r *http.Request) {
+	const maxImageSize = 8 << 20
+	if err := r.ParseMultipartForm(maxImageSize + 1024); err != nil {
+		writeError(w, http.StatusBadRequest, "image is too large")
+		return
+	}
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "image is required")
+		return
+	}
+	defer file.Close()
+	if header.Size <= 0 || header.Size > maxImageSize {
+		writeError(w, http.StatusBadRequest, "image is too large")
+		return
+	}
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(file, head)
+	head = head[:n]
+	contentType := http.DetectContentType(head)
+	extensions := map[string]string{
+		"image/jpeg": ".jpg",
+		"image/png":  ".png",
+		"image/gif":  ".gif",
+		"image/webp": ".webp",
+	}
+	ext, ok := extensions[contentType]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "only jpg, png, gif, and webp images are allowed")
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read image")
+		return
+	}
+	dir := filepath.Join(a.cfg.UploadDir, "images")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not prepare upload directory")
+		return
+	}
+	name, err := randomFileName(ext)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create file name")
+		return
+	}
+	path := filepath.Join(dir, name)
+	dst, err := os.Create(path)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save image")
+		return
+	}
+	defer dst.Close()
+	if _, err := io.Copy(dst, file); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save image")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"url":  "/uploads/images/" + name,
+		"name": header.Filename,
+		"size": header.Size,
+	})
+}
+
 func (a *API) listServers(w http.ResponseWriter, r *http.Request) {
 	servers, err := a.store.ListServers(r.Context(), claimsFrom(r).UserID)
 	if err != nil {
@@ -364,17 +435,24 @@ func (a *API) listMessages(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) createMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Content string `json:"content"`
+		Content   string  `json:"content"`
+		ImageURL  *string `json:"imageUrl"`
+		ImageName *string `json:"imageName"`
+		ImageSize *int64  `json:"imageSize"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
 	body.Content = strings.TrimSpace(body.Content)
-	if body.Content == "" || len(body.Content) > 2000 {
+	if (body.Content == "" && body.ImageURL == nil) || len(body.Content) > 2000 {
 		writeError(w, http.StatusBadRequest, "invalid message content")
 		return
 	}
-	msg, err := a.store.CreateMessage(r.Context(), r.PathValue("channelID"), claimsFrom(r).UserID, body.Content)
+	if body.ImageURL != nil && !strings.HasPrefix(*body.ImageURL, "/uploads/images/") {
+		writeError(w, http.StatusBadRequest, "invalid image url")
+		return
+	}
+	msg, err := a.store.CreateMessage(r.Context(), r.PathValue("channelID"), claimsFrom(r).UserID, body.Content, body.ImageURL, body.ImageName, body.ImageSize)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "could not create message")
 		return
@@ -396,6 +474,29 @@ func (a *API) adminUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, users)
+}
+
+func (a *API) adminSetUserRole(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Role string `json:"role"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Role != "user" && body.Role != "admin" {
+		writeError(w, http.StatusBadRequest, "invalid role")
+		return
+	}
+	if claimsFrom(r).UserID == r.PathValue("userID") && body.Role != "admin" {
+		writeError(w, http.StatusBadRequest, "cannot remove your own admin role")
+		return
+	}
+	user, err := a.store.SetUserRole(r.Context(), r.PathValue("userID"), body.Role)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
 }
 
 func (a *API) adminServers(w http.ResponseWriter, r *http.Request) {
@@ -448,4 +549,12 @@ func normalizeError(err error) error {
 		return nil
 	}
 	return err
+}
+
+func randomFileName(ext string) (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes) + ext, nil
 }
