@@ -53,6 +53,8 @@ The backend seeds this account on startup only when it does not already exist. O
 
 Production login and uploads use same-origin `/api`, `/ws`, and `/uploads` paths. Make sure Nginx proxies `/api/`, `/ws`, and `/uploads/` to the backend on `127.0.0.1:8080`; otherwise login/register, realtime voice, or uploaded images will fail. Do not run `docker compose down -v` in production unless you intentionally want to delete the PostgreSQL volume, Garage volumes, local upload fallback volume, and all registered accounts.
 
+Nginx must not serve `/uploads/` as a local static directory. It should proxy `/uploads/` to the Go backend, because the backend reads images from Garage and streams them back to the browser.
+
 ## Garage Object Storage
 
 Docker Compose starts a single-node Garage service with a default S3-compatible bucket:

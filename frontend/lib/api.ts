@@ -60,9 +60,6 @@ export const api = {
   url: API_URL,
   assetUrl: (path: string) => {
     if (/^https?:\/\//.test(path)) return path;
-    if (!API_URL && typeof window !== "undefined" && window.location.port === "3000") {
-      return `${window.location.protocol}//${window.location.hostname}:8080${path}`;
-    }
     return `${API_URL}${path}`;
   },
   wsUrl: (token: string) => {

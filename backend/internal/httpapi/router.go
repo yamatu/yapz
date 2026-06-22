@@ -303,20 +303,18 @@ func (a *API) serveImage(w http.ResponseWriter, r *http.Request) {
 			Bucket: aws.String(a.cfg.S3Bucket),
 			Key:    aws.String("images/" + name),
 		})
-		if err != nil {
-			http.NotFound(w, r)
+		if err == nil {
+			defer object.Body.Close()
+			if object.ContentType != nil {
+				w.Header().Set("Content-Type", *object.ContentType)
+			}
+			if object.ContentLength != nil {
+				w.Header().Set("Content-Length", strconv.FormatInt(*object.ContentLength, 10))
+			}
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			_, _ = io.Copy(w, object.Body)
 			return
 		}
-		defer object.Body.Close()
-		if object.ContentType != nil {
-			w.Header().Set("Content-Type", *object.ContentType)
-		}
-		if object.ContentLength != nil {
-			w.Header().Set("Content-Length", strconv.FormatInt(*object.ContentLength, 10))
-		}
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		_, _ = io.Copy(w, object.Body)
-		return
 	}
 	path := filepath.Join(a.cfg.UploadDir, "images", name)
 	http.ServeFile(w, r, path)
