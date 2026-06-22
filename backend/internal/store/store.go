@@ -160,6 +160,29 @@ func (s *Store) ListMembershipServerIDs(ctx context.Context, userID string) ([]s
 	return ids, rows.Err()
 }
 
+func (s *Store) ListServerMemberStatuses(ctx context.Context, serverID string) ([]Member, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT u.id, u.username, u.avatar_url, u.status, sm.role
+		FROM server_members sm
+		JOIN users u ON u.id = sm.user_id
+		WHERE sm.server_id = $1
+		ORDER BY sm.role DESC, u.username
+	`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := make([]Member, 0)
+	for rows.Next() {
+		var member Member
+		if err := rows.Scan(&member.ID, &member.Username, &member.AvatarURL, &member.Status, &member.Role); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
+}
+
 func (s *Store) EnsureAdmin(ctx context.Context, username, email, password string) error {
 	hash, err := auth.HashPassword(password)
 	if err != nil {

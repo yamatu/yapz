@@ -291,6 +291,10 @@ func (c *Client) readPump() {
 		case "join_server":
 			if ok, err := c.hub.store.IsServerMember(context.Background(), msg.ServerID, c.userID); err == nil && ok {
 				c.hub.joinServer(c, msg.ServerID)
+				if members, err := c.hub.store.ListServerMemberStatuses(context.Background(), msg.ServerID); err == nil {
+					payload, _ := json.Marshal(members)
+					c.send <- Envelope{Type: "member_snapshot", ServerID: msg.ServerID, Payload: payload}
+				}
 				c.send <- Envelope{Type: "server_joined", ServerID: msg.ServerID}
 			}
 		case "join_channel":

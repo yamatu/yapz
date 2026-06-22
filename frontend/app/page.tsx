@@ -65,8 +65,10 @@ export default function Home() {
   const voiceChannelRef = useRef<string | null>(null);
   const textChannelRef = useRef<string | null>(null);
   const activeServerIdRef = useRef<string | null>(null);
+  const textChannelIdRef = useRef<string | null>(null);
   const userRef = useRef<User | null>(null);
   const loadServersRef = useRef<() => void>(() => undefined);
+  const loadMembersRef = useRef<() => void>(() => undefined);
   const wsRef = useRef<WebSocket | null>(null);
 
   const loadServers = useCallback(async () => {
@@ -115,6 +117,17 @@ export default function Home() {
     };
   }, [loadServers]);
 
+  const loadActiveMembers = useCallback(async () => {
+    if (!token || !activeServerId) return;
+    setMembers(await api.members(token, activeServerId));
+  }, [activeServerId, token]);
+
+  useEffect(() => {
+    loadMembersRef.current = () => {
+      void loadActiveMembers();
+    };
+  }, [loadActiveMembers]);
+
   useEffect(() => {
     if (!token || !activeServerId) {
       setChannels([]);
@@ -149,7 +162,14 @@ export default function Home() {
     if (!token) return;
     const ws = new WebSocket(api.wsUrl(token));
     wsRef.current = ws;
-    ws.onopen = () => setStatus("在线");
+    ws.onopen = () => {
+      setStatus("在线");
+      const serverID = activeServerIdRef.current;
+      const channelID = textChannelIdRef.current;
+      if (serverID) ws.send(JSON.stringify({ type: "join_server", serverId: serverID }));
+      if (channelID) ws.send(JSON.stringify({ type: "join_channel", channelId: channelID }));
+      loadMembersRef.current();
+    };
     ws.onclose = () => setStatus("已断开");
     ws.onerror = () => setStatus("连接异常");
     ws.onmessage = async (event) => {
@@ -169,6 +189,9 @@ export default function Home() {
       if (envelope.type === "member_status" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
         const payload = envelope.payload as { userId: string; status: string };
         setMembers((prev) => prev.map((member) => (member.id === payload.userId ? { ...member, status: payload.status } : member)));
+      }
+      if (envelope.type === "member_snapshot" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
+        setMembers((envelope.payload ?? []) as Member[]);
       }
       if (envelope.type === "channel_joined" && pendingVoiceJoinRef.current === envelope.channelId) {
         pendingVoiceJoinRef.current = null;
@@ -223,6 +246,7 @@ export default function Home() {
 
   useEffect(() => {
     textChannelRef.current = textChannelId;
+    textChannelIdRef.current = textChannelId;
   }, [textChannelId]);
 
   useEffect(() => {
@@ -236,8 +260,9 @@ export default function Home() {
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN && activeServerId) {
       wsRef.current.send(JSON.stringify({ type: "join_server", serverId: activeServerId }));
+      void loadActiveMembers();
     }
-  }, [activeServerId, status]);
+  }, [activeServerId, loadActiveMembers, status]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN && textChannelId) {
