@@ -40,7 +40,16 @@ type Client struct {
 	username string
 	rooms    map[string]bool
 	servers  map[string]bool
+	text     string
 	voice    string
+}
+
+type MemberLocation struct {
+	UserID    string `json:"userId"`
+	TextID    string `json:"textId,omitempty"`
+	VoiceID   string `json:"voiceId,omitempty"`
+	TextName  string `json:"textName,omitempty"`
+	VoiceName string `json:"voiceName,omitempty"`
 }
 
 type Envelope struct {
@@ -151,6 +160,7 @@ func (h *Hub) join(client *Client, channelID string) {
 	}
 	h.rooms[channelID][client] = true
 	client.rooms[channelID] = true
+	client.text = channelID
 }
 
 func (h *Hub) joinServer(client *Client, serverID string) {
@@ -161,6 +171,126 @@ func (h *Hub) joinServer(client *Client, serverID string) {
 	}
 	h.serverRooms[serverID][client] = true
 	client.servers[serverID] = true
+}
+
+func (h *Hub) voiceCount(channelID string) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.voiceRooms[channelID])
+}
+
+func (h *Hub) voiceCounts(serverID string) map[string]int {
+	channels, err := h.store.ListVoiceChannels(context.Background(), serverID)
+	if err != nil {
+		return map[string]int{}
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	counts := make(map[string]int, len(channels))
+	for _, channel := range channels {
+		counts[channel.ID] = len(h.voiceRooms[channel.ID])
+	}
+	return counts
+}
+
+func (h *Hub) memberLocations(serverID string) []MemberLocation {
+	channels, err := h.store.ListChannelsByServer(context.Background(), serverID)
+	if err != nil {
+		return []MemberLocation{}
+	}
+	names := make(map[string]string, len(channels))
+	for _, channel := range channels {
+		names[channel.ID] = channel.Name
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	locations := make([]MemberLocation, 0)
+	for client := range h.serverRooms[serverID] {
+		locations = append(locations, MemberLocation{
+			UserID:    client.userID,
+			TextID:    client.text,
+			VoiceID:   client.voice,
+			TextName:  names[client.text],
+			VoiceName: names[client.voice],
+		})
+	}
+	return locations
+}
+
+func (h *Hub) publishMemberLocation(client *Client) {
+	h.mu.RLock()
+	serverIDs := make([]string, 0, len(client.servers))
+	for serverID := range client.servers {
+		serverIDs = append(serverIDs, serverID)
+	}
+	textID := client.text
+	voiceID := client.voice
+	h.mu.RUnlock()
+
+	if len(serverIDs) == 0 {
+		return
+	}
+	for _, serverID := range serverIDs {
+		channels, err := h.store.ListChannelsByServer(context.Background(), serverID)
+		if err != nil {
+			continue
+		}
+		names := make(map[string]string, len(channels))
+		for _, channel := range channels {
+			names[channel.ID] = channel.Name
+		}
+		payload, _ := json.Marshal(MemberLocation{
+			UserID:    client.userID,
+			TextID:    textID,
+			VoiceID:   voiceID,
+			TextName:  names[textID],
+			VoiceName: names[voiceID],
+		})
+		h.mu.RLock()
+		targets := h.serverRooms[serverID]
+		for target := range targets {
+			select {
+			case target.send <- Envelope{Type: "member_location", ServerID: serverID, UserID: client.userID, Payload: payload}:
+			default:
+				go h.removeClient(target)
+			}
+		}
+		h.mu.RUnlock()
+	}
+}
+
+func (h *Hub) publishMemberLocationToServers(serverIDs []string, location MemberLocation) {
+	payload, _ := json.Marshal(location)
+	for _, serverID := range serverIDs {
+		h.mu.RLock()
+		targets := h.serverRooms[serverID]
+		for target := range targets {
+			select {
+			case target.send <- Envelope{Type: "member_location", ServerID: serverID, UserID: location.UserID, Payload: payload}:
+			default:
+				go h.removeClient(target)
+			}
+		}
+		h.mu.RUnlock()
+	}
+}
+
+func (h *Hub) publishVoiceCount(channelID string) {
+	serverID, err := h.store.FindVoiceChannelServer(context.Background(), channelID)
+	if err != nil {
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{"channelId": channelID, "count": h.voiceCount(channelID)})
+	h.mu.RLock()
+	targets := h.serverRooms[serverID]
+	for client := range targets {
+		select {
+		case client.send <- Envelope{Type: "voice_count", ChannelID: channelID, ServerID: serverID, Payload: payload}:
+		default:
+			go h.removeClient(client)
+		}
+	}
+	h.mu.RUnlock()
 }
 
 func (h *Hub) joinVoice(client *Client, channelID string) ([]VoiceMember, string) {
@@ -213,10 +343,18 @@ func (h *Hub) leaveVoice(client *Client, channelID string) {
 }
 
 func (h *Hub) removeClient(client *Client) {
+	var leftVoice string
+	serverIDs := make([]string, 0)
+	wentOffline := false
+
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if _, ok := h.clients[client]; !ok {
+		h.mu.Unlock()
 		return
+	}
+	leftVoice = client.voice
+	for serverID := range client.servers {
+		serverIDs = append(serverIDs, serverID)
 	}
 	delete(h.clients, client)
 	delete(h.users[client.userID], client)
@@ -226,10 +364,7 @@ func (h *Hub) removeClient(client *Client) {
 	h.userCounts[client.userID]--
 	if h.userCounts[client.userID] <= 0 {
 		delete(h.userCounts, client.userID)
-		go func() {
-			_ = h.store.SetUserStatus(context.Background(), client.userID, "offline")
-			h.publishMemberStatus(client.userID, client.username, "offline")
-		}()
+		wentOffline = true
 	}
 	for room := range client.rooms {
 		delete(h.rooms[room], client)
@@ -249,6 +384,19 @@ func (h *Hub) removeClient(client *Client) {
 	}
 	close(client.send)
 	_ = client.conn.Close()
+	h.mu.Unlock()
+
+	if leftVoice != "" {
+		go h.Publish(Envelope{Type: "voice_leave", ChannelID: leftVoice, UserID: client.userID, Username: client.username})
+		go h.publishVoiceCount(leftVoice)
+	}
+	if wentOffline {
+		go func() {
+			_ = h.store.SetUserStatus(context.Background(), client.userID, "offline")
+			h.publishMemberStatus(client.userID, client.username, "offline")
+			h.publishMemberLocationToServers(serverIDs, MemberLocation{UserID: client.userID})
+		}()
+	}
 }
 
 func (h *Hub) publishMemberStatus(userID, username, status string) {
@@ -295,27 +443,37 @@ func (c *Client) readPump() {
 					payload, _ := json.Marshal(members)
 					c.send <- Envelope{Type: "member_snapshot", ServerID: msg.ServerID, Payload: payload}
 				}
+				countsPayload, _ := json.Marshal(c.hub.voiceCounts(msg.ServerID))
+				c.send <- Envelope{Type: "voice_counts", ServerID: msg.ServerID, Payload: countsPayload}
+				locationsPayload, _ := json.Marshal(c.hub.memberLocations(msg.ServerID))
+				c.send <- Envelope{Type: "member_locations", ServerID: msg.ServerID, Payload: locationsPayload}
 				c.send <- Envelope{Type: "server_joined", ServerID: msg.ServerID}
 			}
 		case "join_channel":
 			if ok, err := c.hub.store.IsChannelMember(context.Background(), msg.ChannelID, c.userID); err == nil && ok {
 				c.hub.join(c, msg.ChannelID)
 				c.send <- Envelope{Type: "channel_joined", ChannelID: msg.ChannelID}
+				c.hub.publishMemberLocation(c)
 			}
 		case "voice_join":
 			if c.rooms[msg.ChannelID] {
 				existing, oldVoice := c.hub.joinVoice(c, msg.ChannelID)
 				if oldVoice != "" {
 					c.hub.Publish(Envelope{Type: "voice_leave", ChannelID: oldVoice, UserID: c.userID, Username: c.username})
+					c.hub.publishVoiceCount(oldVoice)
 				}
 				payload, _ := json.Marshal(existing)
 				c.send <- Envelope{Type: "voice_members", ChannelID: msg.ChannelID, Payload: payload}
 				c.hub.Publish(msg)
+				c.hub.publishVoiceCount(msg.ChannelID)
+				c.hub.publishMemberLocation(c)
 			}
 		case "voice_leave":
 			if c.rooms[msg.ChannelID] {
 				c.hub.leaveVoice(c, msg.ChannelID)
 				c.hub.Publish(msg)
+				c.hub.publishVoiceCount(msg.ChannelID)
+				c.hub.publishMemberLocation(c)
 			}
 		case "voice_signal":
 			if c.rooms[msg.ChannelID] {

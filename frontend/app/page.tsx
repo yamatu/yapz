@@ -32,6 +32,7 @@ import type { AdminChannel, AdminServer, AdminUser, Channel, Member, Message, Se
 
 type AuthMode = "login" | "register";
 type View = "chat" | "settings" | "admin";
+type MemberLocation = { userId: string; textId?: string; voiceId?: string; textName?: string; voiceName?: string };
 
 export default function Home() {
   const [token, setToken] = useState<string | null>(null);
@@ -49,6 +50,8 @@ export default function Home() {
   const [view, setView] = useState<View>("chat");
   const [authReady, setAuthReady] = useState(false);
   const [voiceMembers, setVoiceMembers] = useState<Record<string, string>>({});
+  const [voiceCounts, setVoiceCounts] = useState<Record<string, number>>({});
+  const [memberLocations, setMemberLocations] = useState<Record<string, MemberLocation>>({});
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
   const [remoteVolumes, setRemoteVolumes] = useState<Record<string, number>>({});
   const [remoteLevels, setRemoteLevels] = useState<Record<string, number>>({});
@@ -139,6 +142,8 @@ export default function Home() {
       setChannels([]);
       setMembers([]);
       setMessages([]);
+      setVoiceCounts({});
+      setMemberLocations({});
       setTextChannelId(null);
       setSelectedVoiceChannelId(null);
       return;
@@ -146,6 +151,13 @@ export default function Home() {
     Promise.all([api.channels(token, activeServerId), api.members(token, activeServerId)]).then(([channelData, memberData]) => {
       setChannels(channelData);
       setMembers(memberData);
+      setVoiceCounts((prev) => {
+        const next: Record<string, number> = {};
+        for (const channel of channelData) {
+          if (channel.kind === "voice") next[channel.id] = prev[channel.id] ?? 0;
+        }
+        return next;
+      });
       setTextChannelId((current) => (current && channelData.some((ch) => ch.id === current && ch.kind === "text") ? current : channelData.find((ch) => ch.kind === "text")?.id ?? null));
       setSelectedVoiceChannelId((current) => (current && channelData.some((ch) => ch.id === current && ch.kind === "voice") ? current : channelData.find((ch) => ch.kind === "voice")?.id ?? null));
       if (voiceChannelId && !channelData.some((ch) => ch.id === voiceChannelId)) {
@@ -198,6 +210,21 @@ export default function Home() {
       }
       if (envelope.type === "member_snapshot" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
         setMembers((envelope.payload ?? []) as Member[]);
+      }
+      if (envelope.type === "voice_counts" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
+        setVoiceCounts((envelope.payload ?? {}) as Record<string, number>);
+      }
+      if (envelope.type === "voice_count" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
+        const payload = envelope.payload as { channelId: string; count: number };
+        setVoiceCounts((prev) => ({ ...prev, [payload.channelId]: payload.count }));
+      }
+      if (envelope.type === "member_locations" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
+        const locations = (envelope.payload ?? []) as MemberLocation[];
+        setMemberLocations(Object.fromEntries(locations.map((location) => [location.userId, location])));
+      }
+      if (envelope.type === "member_location" && envelope.serverId === activeServerIdRef.current && envelope.payload) {
+        const location = envelope.payload as MemberLocation;
+        setMemberLocations((prev) => ({ ...prev, [location.userId]: location }));
       }
       if (envelope.type === "channel_joined" && pendingVoiceJoinRef.current === envelope.channelId) {
         pendingVoiceJoinRef.current = null;
@@ -310,6 +337,8 @@ export default function Home() {
     setChannels([]);
     setMessages([]);
     setMembers([]);
+    setVoiceCounts({});
+    setMemberLocations({});
     setView("chat");
   }
 
@@ -445,8 +474,8 @@ export default function Home() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-4">
-          <ChannelGroup title="文字频道" kind="text" channels={channels} activeChannelId={textChannelId} onSelect={setTextChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onRenamed={(channel) => setChannels((prev) => prev.map((item) => (item.id === channel.id ? channel : item)))} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
-          <ChannelGroup title="语音频道" kind="voice" channels={channels} activeChannelId={selectedVoiceChannelId} onSelect={setSelectedVoiceChannelId} token={token} server={activeServer} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onRenamed={(channel) => setChannels((prev) => prev.map((item) => (item.id === channel.id ? channel : item)))} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
+          <ChannelGroup title="文字频道" kind="text" channels={channels} activeChannelId={textChannelId} onSelect={setTextChannelId} token={token} server={activeServer} voiceCounts={voiceCounts} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onRenamed={(channel) => setChannels((prev) => prev.map((item) => (item.id === channel.id ? channel : item)))} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
+          <ChannelGroup title="语音频道" kind="voice" channels={channels} activeChannelId={selectedVoiceChannelId} onSelect={setSelectedVoiceChannelId} token={token} server={activeServer} voiceCounts={voiceCounts} onCreated={(channel) => setChannels((prev) => [...prev, channel])} onRenamed={(channel) => setChannels((prev) => prev.map((item) => (item.id === channel.id ? channel : item)))} onDeleted={(id) => setChannels((prev) => prev.filter((channel) => channel.id !== id))} />
         </div>
 
         <div className="border-t border-line bg-[#171a21] p-3">
@@ -541,7 +570,7 @@ export default function Home() {
               ) : null}
             </div>
           </section>
-          <MembersPanel members={members} currentUser={user} activeServer={activeServer} onKick={removeMember} onLeave={leaveServer} />
+          <MembersPanel members={members} locations={memberLocations} currentUser={user} activeServer={activeServer} onKick={removeMember} onLeave={leaveServer} />
         </>
       )}
     </main>
@@ -660,6 +689,7 @@ function ChannelGroup(props: {
   onSelect: (id: string) => void;
   token: string;
   server: Server | null;
+  voiceCounts: Record<string, number>;
   onCreated: (channel: Channel) => void;
   onRenamed: (channel: Channel) => void;
   onDeleted: (channelID: string) => void;
@@ -706,6 +736,7 @@ function ChannelGroup(props: {
             <button onClick={() => props.onSelect(channel.id)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left text-sm">
               {channel.kind === "voice" ? <Volume2 size={17} /> : <Hash size={17} />}
               <span className="truncate">{channel.name}</span>
+              {channel.kind === "voice" ? <span className={cn("ml-auto rounded-md px-1.5 py-0.5 text-xs", (props.voiceCounts[channel.id] ?? 0) > 0 ? "bg-mint/15 text-mint" : "bg-[#101319] text-zinc-500")}>{props.voiceCounts[channel.id] ?? 0}</span> : null}
             </button>
             {canDelete ? (
               <div className="mr-1 flex opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
@@ -987,12 +1018,14 @@ function RemoteAudio({ stream, volume, onLevel }: { stream: MediaStream; volume:
 
 function MembersPanel({
   members,
+  locations,
   currentUser,
   activeServer,
   onKick,
   onLeave
 }: {
   members: Member[];
+  locations: Record<string, MemberLocation>;
   currentUser: User;
   activeServer: Server | null;
   onKick: (memberID: string) => Promise<void>;
@@ -1013,15 +1046,23 @@ function MembersPanel({
         {activeServer && activeServer.role !== "owner" ? <Button variant="secondary" onClick={onLeave} className="mt-3 w-full">退出服务器</Button> : null}
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {visibleMembers.map((member) => (
-          <div key={member.id} className="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-rail">
-            <div className="relative grid h-9 w-9 place-items-center rounded-lg bg-[#2c3340] text-sm font-bold">{member.username[0]?.toUpperCase()}<span className={cn("absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#171a21]", member.status === "online" ? "bg-mint" : "bg-coral")} /></div>
-            <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{member.username}</p><p className={cn("text-xs", member.status === "online" ? "text-mint" : "text-coral")}>{member.status === "online" ? "在线" : "离线"} · {member.role}</p></div>
-            {canKick && member.id !== currentUser.id && member.role !== "owner" ? (
-              <Button title="踢出成员" variant="ghost" onClick={() => onKick(member.id)} className="h-8 w-8 p-0 text-coral"><UserMinus size={15} /></Button>
-            ) : null}
-          </div>
-        ))}
+        {visibleMembers.map((member) => {
+          const location = locations[member.id];
+          const locationText = location?.voiceName ? `语音：${location.voiceName}` : location?.textName ? `文字：${location.textName}` : "未进入频道";
+          return (
+            <div key={member.id} className="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-rail">
+              <div className="relative grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#2c3340] text-sm font-bold">{member.username[0]?.toUpperCase()}<span className={cn("absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#171a21]", member.status === "online" ? "bg-mint" : "bg-coral")} /></div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{member.username}</p>
+                <p className={cn("text-xs", member.status === "online" ? "text-mint" : "text-coral")}>{member.status === "online" ? "在线" : "离线"} · {member.role}</p>
+                <p className="truncate text-xs text-zinc-500">{locationText}</p>
+              </div>
+              {canKick && member.id !== currentUser.id && member.role !== "owner" ? (
+                <Button title="踢出成员" variant="ghost" onClick={() => onKick(member.id)} className="h-8 w-8 shrink-0 p-0 text-coral"><UserMinus size={15} /></Button>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
       <div className="border-t border-line p-3">
         <PaginationControls page={currentPage} pageCount={pageCount} onPage={setPage} />
