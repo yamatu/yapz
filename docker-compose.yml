@@ -1,4 +1,21 @@
 services:
+  garage:
+    image: dxflrs/garage:v2.3.0
+    container_name: yapz-garage
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_CONFIG_FILE: /etc/garage.toml
+      GARAGE_DEFAULT_ACCESS_KEY: GKYAPZLOCALDEV0000000000000000
+      GARAGE_DEFAULT_SECRET_KEY: yapz-local-dev-secret-change-me-000000000000000000000000
+      GARAGE_DEFAULT_BUCKET: yapz-images
+    ports:
+      - "3900:3900"
+      - "3903:3903"
+    volumes:
+      - ./garage/garage.toml:/etc/garage.toml:ro
+      - yapz-garage-meta:/var/lib/garage/meta
+      - yapz-garage-data:/var/lib/garage/data
+
   postgres:
     image: postgres:16-alpine
     container_name: yapz-postgres
@@ -31,9 +48,17 @@ services:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: Admin123456
       UPLOAD_DIR: /app/uploads
+      STORAGE_DRIVER: garage
+      S3_ENDPOINT: http://garage:3900
+      S3_REGION: garage
+      S3_BUCKET: yapz-images
+      S3_ACCESS_KEY_ID: GKYAPZLOCALDEV0000000000000000
+      S3_SECRET_ACCESS_KEY: yapz-local-dev-secret-change-me-000000000000000000000000
     ports:
       - "8080:8080"
     depends_on:
+      garage:
+        condition: service_started
       postgres:
         condition: service_healthy
     volumes:
@@ -56,3 +81,5 @@ volumes:
   yapz-postgres:
   yapz-go-cache:
   yapz-uploads:
+  yapz-garage-meta:
+  yapz-garage-data:

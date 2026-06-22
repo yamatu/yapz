@@ -40,7 +40,9 @@ Services:
 - Frontend: `http://localhost:3000`
 - Backend: `http://localhost:8080`
 - PostgreSQL: `localhost:5432`
-- Uploads: persisted in the `yapz-uploads` Docker volume and served from `/uploads/`
+- Garage S3 API: `http://localhost:3900`
+- Garage admin API: `http://localhost:3903`
+- Uploaded images: stored in Garage bucket `yapz-images` and served through backend `/uploads/`
 
 Default admin account:
 
@@ -49,7 +51,19 @@ Default admin account:
 
 The backend seeds this account on startup only when it does not already exist. Override `ADMIN_EMAIL`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` in `docker-compose.yml` or your deployment environment before the first startup to configure your own administrator account. After the account exists, change its password from the personal center.
 
-Production login and uploads use same-origin `/api`, `/ws`, and `/uploads` paths. Make sure Nginx proxies `/api/`, `/ws`, and `/uploads/` to the backend on `127.0.0.1:8080`; otherwise login/register, realtime voice, or uploaded images will fail. Do not run `docker compose down -v` in production unless you intentionally want to delete the PostgreSQL volume, uploads volume, and all registered accounts.
+Production login and uploads use same-origin `/api`, `/ws`, and `/uploads` paths. Make sure Nginx proxies `/api/`, `/ws`, and `/uploads/` to the backend on `127.0.0.1:8080`; otherwise login/register, realtime voice, or uploaded images will fail. Do not run `docker compose down -v` in production unless you intentionally want to delete the PostgreSQL volume, Garage volumes, local upload fallback volume, and all registered accounts.
+
+## Garage Object Storage
+
+Docker Compose starts a single-node Garage service with a default S3-compatible bucket:
+
+- Bucket: `yapz-images`
+- Endpoint inside Docker: `http://garage:3900`
+- Local S3 endpoint: `http://localhost:3900`
+- Access key: `GKYAPZLOCALDEV0000000000000000`
+- Secret key: `yapz-local-dev-secret-change-me-000000000000000000000000`
+
+Change these values in `docker-compose.yml` before production use. The backend still serves images through `/uploads/images/{file}` so the browser never needs S3 credentials.
 
 ## Default Environment
 
@@ -63,6 +77,12 @@ Backend defaults:
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=Admin123456`
 - `UPLOAD_DIR=uploads`
+- `STORAGE_DRIVER=local`
+- `S3_ENDPOINT=`
+- `S3_REGION=garage`
+- `S3_BUCKET=yapz-images`
+- `S3_ACCESS_KEY_ID=`
+- `S3_SECRET_ACCESS_KEY=`
 
 Frontend defaults:
 

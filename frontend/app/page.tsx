@@ -3,6 +3,8 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Copy,
+  Download,
+  Expand,
   Gamepad2,
   Hash,
   Headphones,
@@ -16,6 +18,7 @@ import {
   Send,
   Settings,
   Shield,
+  SmilePlus,
   Trash2,
   UserCog,
   UserMinus,
@@ -709,6 +712,8 @@ function InviteButton({ token, server }: { token: string; server: Server | null 
 function ChatPanel({ token, channel, messages }: { token: string; channel: Channel | null; messages: Message[] }) {
   const [content, setContent] = useState("");
   const [image, setImage] = useState<File | null>(null);
+  const [preview, setPreview] = useState<Message | null>(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -753,9 +758,10 @@ function ChatPanel({ token, channel, messages }: { token: string; channel: Chann
                   <div className="flex flex-wrap items-baseline gap-2"><p className="font-semibold">{message.username}</p><time className="text-xs text-zinc-500">{new Date(message.createdAt).toLocaleString()}</time></div>
                   {message.content ? <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-200">{message.content}</p> : null}
                   {message.imageUrl ? (
-                    <a href={api.assetUrl(message.imageUrl)} target="_blank" rel="noreferrer" className="mt-3 block max-w-[520px] overflow-hidden rounded-md border border-line bg-[#11151d]">
+                    <button type="button" onClick={() => setPreview(message)} className="group relative mt-3 block max-w-[520px] overflow-hidden rounded-md border border-line bg-[#11151d] text-left">
                       <img src={api.assetUrl(message.imageUrl)} alt={message.imageName ?? "上传图片"} className="max-h-[280px] w-full object-contain sm:max-h-[360px]" />
-                    </a>
+                      <span className="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-md bg-black/50 text-white opacity-0 transition group-hover:opacity-100"><Expand size={16} /></span>
+                    </button>
                   ) : null}
                 </div>
               </div>
@@ -767,14 +773,57 @@ function ChatPanel({ token, channel, messages }: { token: string; channel: Chann
       <form onSubmit={send} className="border-t border-line bg-[#181b22] p-4">
         {image ? <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-line bg-[#101319] px-3 py-2 text-xs text-zinc-400"><span className="truncate">{image.name}</span><button type="button" className="text-coral" onClick={() => { setImage(null); if (fileRef.current) fileRef.current.value = ""; }}>移除</button></div> : null}
         {error ? <p className="mb-2 text-sm text-coral">{error}</p> : null}
+        {emojiOpen ? <EmojiPicker onPick={(emoji) => { setContent((value) => value + emoji); setEmojiOpen(false); }} /> : null}
         <div className="flex items-center gap-2 rounded-lg border border-line bg-[#101319] px-3 py-2">
           <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" className="hidden" onChange={(event) => setImage(event.target.files?.[0] ?? null)} />
           <Button title="上传图片" type="button" variant="secondary" onClick={() => fileRef.current?.click()} className="h-9 w-9 shrink-0 p-0"><ImagePlus size={17} /></Button>
+          <Button title="选择表情" type="button" variant="secondary" onClick={() => setEmojiOpen((value) => !value)} className="h-9 w-9 shrink-0 p-0"><SmilePlus size={17} /></Button>
           <input value={content} onChange={(event) => setContent(event.target.value)} placeholder={channel ? `发送消息到 #${channel.name}` : "请选择频道"} className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none" />
           <Button title="发送" disabled={sending || !channel || (!content.trim() && !image)} className="h-9 w-9 shrink-0 p-0">{sending ? <Loader2 className="animate-spin" size={17} /> : <Send size={17} />}</Button>
         </div>
       </form>
+      {preview?.imageUrl ? <ImagePreview message={preview} onClose={() => setPreview(null)} /> : null}
     </>
+  );
+}
+
+const emojis = ["😀", "😂", "🤣", "😊", "😍", "😎", "😭", "😡", "👍", "👎", "👏", "🙏", "🔥", "💯", "🎮", "🏆", "⚔️", "🛡️", "❤️", "💔", "😴", "🤔", "😅", "🥳"];
+
+function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
+  return (
+    <div className="mb-2 grid grid-cols-8 gap-1 rounded-md border border-line bg-[#101319] p-2 sm:grid-cols-12">
+      {emojis.map((emoji) => <button key={emoji} type="button" onClick={() => onPick(emoji)} className="grid h-9 w-9 place-items-center rounded-md text-xl hover:bg-rail">{emoji}</button>)}
+    </div>
+  );
+}
+
+function ImagePreview({ message, onClose }: { message: Message; onClose: () => void }) {
+  const imageUrl = message.imageUrl ? api.assetUrl(message.imageUrl) : "";
+  async function saveImage() {
+    const response = await fetch(imageUrl);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = message.imageName || "yapz-image";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/80 p-4" onClick={onClose}>
+      <div className="max-h-full w-full max-w-5xl" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="min-w-0 text-sm text-zinc-300"><p className="truncate font-medium">{message.imageName ?? "图片预览"}</p><p className="text-xs text-zinc-500">{message.username}</p></div>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="secondary" onClick={saveImage}><Download size={16} /> 保存</Button>
+            <Button type="button" variant="secondary" onClick={onClose}>关闭</Button>
+          </div>
+        </div>
+        <img src={imageUrl} alt={message.imageName ?? "图片预览"} className="max-h-[82vh] w-full rounded-md object-contain" />
+      </div>
+    </div>
   );
 }
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,26 +14,34 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/jackc/pgx/v5"
 
 	"yapz/backend/internal/auth"
-	"yapz/backend/internal/config"
+	appconfig "yapz/backend/internal/config"
 	"yapz/backend/internal/realtime"
 	"yapz/backend/internal/store"
 )
 
 type API struct {
-	cfg   config.Config
+	cfg   appconfig.Config
 	store *store.Store
 	hub   *realtime.Hub
+	s3    *s3.Client
 }
 
 type ctxKey string
 
 const userKey ctxKey = "user"
 
-func NewRouter(cfg config.Config, st *store.Store, hub *realtime.Hub) http.Handler {
+func NewRouter(cfg appconfig.Config, st *store.Store, hub *realtime.Hub) http.Handler {
 	api := &API{cfg: cfg, store: st, hub: hub}
+	if cfg.StorageDriver == "garage" || cfg.StorageDriver == "s3" {
+		api.s3 = newS3Client(cfg)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", api.health)
@@ -60,7 +69,7 @@ func NewRouter(cfg config.Config, st *store.Store, hub *realtime.Hub) http.Handl
 	mux.Handle("GET /api/admin/channels", api.adminOnly(http.HandlerFunc(api.adminChannels)))
 	mux.Handle("DELETE /api/admin/channels/{channelID}", api.adminOnly(http.HandlerFunc(api.adminDeleteChannel)))
 	mux.Handle("GET /ws", api.authenticated(http.HandlerFunc(api.websocket)))
-	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(cfg.UploadDir))))
+	mux.HandleFunc("GET /uploads/images/{fileName}", api.serveImage)
 
 	return api.cors(mux)
 }
@@ -254,28 +263,25 @@ func (a *API) uploadImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "only jpg, png, gif, and webp images are allowed")
 		return
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not read image")
-		return
-	}
-	dir := filepath.Join(a.cfg.UploadDir, "images")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not prepare upload directory")
-		return
-	}
 	name, err := randomFileName(ext)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create file name")
 		return
 	}
-	path := filepath.Join(dir, name)
-	dst, err := os.Create(path)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not save image")
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read image")
 		return
 	}
-	defer dst.Close()
-	if _, err := io.Copy(dst, file); err != nil {
+	data, err := io.ReadAll(io.LimitReader(file, maxImageSize+1))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read image")
+		return
+	}
+	if int64(len(data)) != header.Size || int64(len(data)) > maxImageSize {
+		writeError(w, http.StatusBadRequest, "image is too large")
+		return
+	}
+	if err := a.saveImage(r.Context(), name, contentType, data); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save image")
 		return
 	}
@@ -284,6 +290,36 @@ func (a *API) uploadImage(w http.ResponseWriter, r *http.Request) {
 		"name": header.Filename,
 		"size": header.Size,
 	})
+}
+
+func (a *API) serveImage(w http.ResponseWriter, r *http.Request) {
+	name := filepath.Base(r.PathValue("fileName"))
+	if name == "." || name == "/" || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	if a.s3 != nil {
+		object, err := a.s3.GetObject(r.Context(), &s3.GetObjectInput{
+			Bucket: aws.String(a.cfg.S3Bucket),
+			Key:    aws.String("images/" + name),
+		})
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer object.Body.Close()
+		if object.ContentType != nil {
+			w.Header().Set("Content-Type", *object.ContentType)
+		}
+		if object.ContentLength != nil {
+			w.Header().Set("Content-Length", strconv.FormatInt(*object.ContentLength, 10))
+		}
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = io.Copy(w, object.Body)
+		return
+	}
+	path := filepath.Join(a.cfg.UploadDir, "images", name)
+	http.ServeFile(w, r, path)
 }
 
 func (a *API) listServers(w http.ResponseWriter, r *http.Request) {
@@ -557,4 +593,34 @@ func randomFileName(ext string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes) + ext, nil
+}
+
+func newS3Client(cfg appconfig.Config) *s3.Client {
+	awsCfg, _ := config.LoadDefaultConfig(
+		context.Background(),
+		config.WithRegion(cfg.S3Region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, "")),
+	)
+	return s3.NewFromConfig(awsCfg, func(options *s3.Options) {
+		options.BaseEndpoint = aws.String(cfg.S3Endpoint)
+		options.UsePathStyle = true
+	})
+}
+
+func (a *API) saveImage(ctx context.Context, name, contentType string, data []byte) error {
+	if a.s3 != nil {
+		_, err := a.s3.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(a.cfg.S3Bucket),
+			Key:           aws.String("images/" + name),
+			Body:          bytes.NewReader(data),
+			ContentType:   aws.String(contentType),
+			ContentLength: aws.Int64(int64(len(data))),
+		})
+		return err
+	}
+	dir := filepath.Join(a.cfg.UploadDir, "images")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, name), data, 0o644)
 }
