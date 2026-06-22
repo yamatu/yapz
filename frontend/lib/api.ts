@@ -94,6 +94,7 @@ export const api = {
   members: (token: string, serverId: string) => requestList<Member>(`/api/servers/${serverId}/members`, token),
   removeMember: (token: string, serverId: string, memberId: string) =>
     request<{ status: string }>(`/api/servers/${serverId}/members/${memberId}`, token, { method: "DELETE" }),
+  iceServers: (token: string) => request<RTCIceServer[]>("/api/rtc/ice", token),
   messages: (token: string, channelId: string) => requestList<Message>(`/api/channels/${channelId}/messages?limit=80`, token),
   uploadImage: (token: string, file: File) => {
     const form = new FormData();
@@ -110,15 +111,3 @@ export const api = {
   deleteAdminChannel: (token: string, channelId: string) =>
     request<{ status: string }>(`/api/admin/channels/${channelId}`, token, { method: "DELETE" })
 };
-
-export function rtcIceServers(): RTCIceServer[] {
-  const urls = process.env.NEXT_PUBLIC_RTC_ICE_URLS?.split(",").map((item) => item.trim()).filter(Boolean);
-  if (!urls?.length) return [{ urls: "stun:stun.l.google.com:19302" }];
-  return [
-    {
-      urls,
-      username: process.env.NEXT_PUBLIC_RTC_ICE_USERNAME,
-      credential: process.env.NEXT_PUBLIC_RTC_ICE_CREDENTIAL
-    }
-  ];
-}

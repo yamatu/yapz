@@ -42,6 +42,7 @@ Services:
 - PostgreSQL: `localhost:5432`
 - Garage S3 API: `http://localhost:3900`
 - Garage admin API: `http://localhost:3903`
+- TURN relay: `3478/tcp`, `3478/udp`, `49160-49200/udp`
 - Uploaded images: stored in Garage bucket `yapz-images` and served through backend `/uploads/`
 
 Default admin account:
@@ -67,6 +68,23 @@ Docker Compose starts a single-node Garage service with a default S3-compatible 
 
 Change these values in `docker-compose.yml` before production use. The backend still serves images through `/uploads/images/{file}` so the browser never needs S3 credentials.
 
+## Voice Connectivity
+
+Yapz uses browser WebRTC audio. WebRTC media is encrypted with DTLS-SRTP, but restrictive networks such as campus Wi-Fi often block direct UDP peer-to-peer traffic. Docker Compose includes a coturn relay so browsers can fall back to TURN:
+
+- Public TURN port: `3478/tcp` and `3478/udp`
+- Relay range: `49160-49200/udp`
+- Default TURN user: `yapz`
+- Default TURN password: `yapz-turn-secret-change-me`
+
+On production, open these firewall ports. The bundled compose defaults `TURN_EXTERNAL_IP` to `156.239.5.202`; override it only if the server public IP changes:
+
+```bash
+docker compose up -d --build
+```
+
+Change `RTC_ICE_URLS`, `RTC_ICE_USERNAME`, and `RTC_ICE_CREDENTIAL` in `docker-compose.yml` if you use a different TURN domain or credentials.
+
 ## Default Environment
 
 Backend defaults:
@@ -85,6 +103,9 @@ Backend defaults:
 - `S3_BUCKET=yapz-images`
 - `S3_ACCESS_KEY_ID=`
 - `S3_SECRET_ACCESS_KEY=`
+- `RTC_ICE_URLS=stun:stun.l.google.com:19302`
+- `RTC_ICE_USERNAME=`
+- `RTC_ICE_CREDENTIAL=`
 
 Frontend defaults:
 

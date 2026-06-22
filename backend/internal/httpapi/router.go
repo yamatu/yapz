@@ -51,6 +51,7 @@ func NewRouter(cfg appconfig.Config, st *store.Store, hub *realtime.Hub) http.Ha
 	mux.Handle("PATCH /api/me", api.authenticated(http.HandlerFunc(api.updateMe)))
 	mux.Handle("POST /api/me/password", api.authenticated(http.HandlerFunc(api.changePassword)))
 	mux.Handle("POST /api/uploads/images", api.authenticated(http.HandlerFunc(api.uploadImage)))
+	mux.Handle("GET /api/rtc/ice", api.authenticated(http.HandlerFunc(api.rtcIce)))
 	mux.Handle("GET /api/servers", api.authenticated(http.HandlerFunc(api.listServers)))
 	mux.Handle("POST /api/servers", api.authenticated(http.HandlerFunc(api.createServer)))
 	mux.Handle("GET /api/servers/{serverID}/invite", api.authenticated(http.HandlerFunc(api.getInvite)))
@@ -290,6 +291,25 @@ func (a *API) uploadImage(w http.ResponseWriter, r *http.Request) {
 		"name": header.Filename,
 		"size": header.Size,
 	})
+}
+
+func (a *API) rtcIce(w http.ResponseWriter, r *http.Request) {
+	urls := make([]string, 0)
+	for _, item := range strings.Split(a.cfg.RTCICEURLs, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			urls = append(urls, item)
+		}
+	}
+	if len(urls) == 0 {
+		urls = []string{"stun:stun.l.google.com:19302"}
+	}
+	server := map[string]any{"urls": urls}
+	if a.cfg.RTCICEUsername != "" || a.cfg.RTCICECredential != "" {
+		server["username"] = a.cfg.RTCICEUsername
+		server["credential"] = a.cfg.RTCICECredential
+	}
+	writeJSON(w, http.StatusOK, []map[string]any{server})
 }
 
 func (a *API) serveImage(w http.ResponseWriter, r *http.Request) {

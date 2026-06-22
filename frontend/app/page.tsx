@@ -27,7 +27,7 @@ import {
 
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
 import { cn } from "@/lib/utils";
-import { api, rtcIceServers } from "@/lib/api";
+import { api } from "@/lib/api";
 import type { AdminChannel, AdminServer, AdminUser, Channel, Member, Message, Server, User } from "@/types/domain";
 
 type AuthMode = "login" | "register";
@@ -56,6 +56,7 @@ export default function Home() {
   const [inputGain, setInputGain] = useState(1);
   const [outputGain, setOutputGain] = useState(1);
   const [noiseSuppression, setNoiseSuppression] = useState(true);
+  const [iceServers, setIceServers] = useState<RTCIceServer[]>([{ urls: "stun:stun.l.google.com:19302" }]);
   const localStreamRef = useRef<MediaStream | null>(null);
   const processedLocalStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -110,6 +111,11 @@ export default function Home() {
   useEffect(() => {
     if (token) void loadServers();
   }, [loadServers, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    api.iceServers(token).then(setIceServers).catch(() => setIceServers([{ urls: "stun:stun.l.google.com:19302" }]));
+  }, [token]);
 
   useEffect(() => {
     loadServersRef.current = () => {
@@ -360,7 +366,7 @@ export default function Home() {
     if (peersRef.current[targetID]) return peersRef.current[targetID];
     const stream = processedLocalStreamRef.current;
     if (!stream) throw new Error("missing local stream");
-    const peer = new RTCPeerConnection({ iceServers: rtcIceServers() });
+    const peer = new RTCPeerConnection({ iceServers, iceTransportPolicy: "all" });
     stream.getTracks().forEach((track) => peer.addTrack(track, stream));
     peer.onicecandidate = (event) => {
       if (event.candidate) sendVoiceSignal(channelID, targetID, { kind: "ice", candidate: event.candidate });

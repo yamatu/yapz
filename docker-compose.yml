@@ -1,4 +1,25 @@
 services:
+  turn:
+    image: coturn/coturn:4.6-alpine
+    container_name: yapz-turn
+    command:
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=yapz:yapz-turn-secret-change-me
+      - --realm=yapz.yamatu.xyz
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --external-ip=${TURN_EXTERNAL_IP:-156.239.5.202}
+      - --log-file=stdout
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "49160-49200:49160-49200/udp"
+
   garage:
     image: dxflrs/garage:v2.3.0
     container_name: yapz-garage
@@ -54,10 +75,15 @@ services:
       S3_BUCKET: yapz-images
       S3_ACCESS_KEY_ID: GKYAPZLOCALDEV0000000000000000
       S3_SECRET_ACCESS_KEY: yapz-local-dev-secret-change-me-000000000000000000000000
+      RTC_ICE_URLS: stun:yapz.yamatu.xyz:3478,turn:yapz.yamatu.xyz:3478?transport=udp,turn:yapz.yamatu.xyz:3478?transport=tcp
+      RTC_ICE_USERNAME: yapz
+      RTC_ICE_CREDENTIAL: yapz-turn-secret-change-me
     ports:
       - "8080:8080"
     depends_on:
       garage:
+        condition: service_started
+      turn:
         condition: service_started
       postgres:
         condition: service_healthy
