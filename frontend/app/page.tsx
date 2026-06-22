@@ -65,7 +65,6 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const micGainRef = useRef<GainNode | null>(null);
   const peersRef = useRef<Record<string, RTCPeerConnection>>({});
-  const pendingVoiceJoinRef = useRef<string | null>(null);
   const voiceChannelRef = useRef<string | null>(null);
   const textChannelRef = useRef<string | null>(null);
   const activeServerIdRef = useRef<string | null>(null);
@@ -226,10 +225,6 @@ export default function Home() {
         const location = envelope.payload as MemberLocation;
         setMemberLocations((prev) => ({ ...prev, [location.userId]: location }));
       }
-      if (envelope.type === "channel_joined" && pendingVoiceJoinRef.current === envelope.channelId) {
-        pendingVoiceJoinRef.current = null;
-        wsRef.current?.send(JSON.stringify({ type: "voice_join", channelId: envelope.channelId }));
-      }
       const currentVoiceChannel = voiceChannelRef.current;
       const currentUser = userRef.current;
       if (!currentVoiceChannel || envelope.channelId !== currentVoiceChannel || !currentUser) return;
@@ -295,13 +290,13 @@ export default function Home() {
       wsRef.current.send(JSON.stringify({ type: "join_server", serverId: activeServerId }));
       void loadActiveMembers();
     }
-  }, [activeServerId, loadActiveMembers, status]);
+  }, [activeServerId, loadActiveMembers]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN && textChannelId) {
       wsRef.current.send(JSON.stringify({ type: "join_channel", channelId: textChannelId }));
     }
-  }, [textChannelId, status]);
+  }, [textChannelId]);
 
   useEffect(() => {
     window.localStorage.setItem("yapz_input_gain", String(inputGain));
@@ -556,8 +551,7 @@ export default function Home() {
                   voiceChannelRef.current = selectedVoiceChannel.id;
                   setVoiceChannelId(selectedVoiceChannel.id);
                   setVoiceMembers({ [user.id]: user.username });
-                  pendingVoiceJoinRef.current = selectedVoiceChannel.id;
-                  wsRef.current?.send(JSON.stringify({ type: "join_channel", channelId: selectedVoiceChannel.id }));
+                  wsRef.current?.send(JSON.stringify({ type: "voice_join", channelId: selectedVoiceChannel.id }));
                   playJoinTone();
                 }}
                 onLeave={() => {
@@ -570,7 +564,7 @@ export default function Home() {
               ) : null}
             </div>
           </section>
-          <MembersPanel members={members} locations={memberLocations} currentUser={user} activeServer={activeServer} onKick={removeMember} onLeave={leaveServer} />
+          <MembersPanel members={members} locations={memberLocations} channels={channels} currentUser={user} activeServer={activeServer} onKick={removeMember} onLeave={leaveServer} />
         </>
       )}
     </main>
@@ -1019,6 +1013,7 @@ function RemoteAudio({ stream, volume, onLevel }: { stream: MediaStream; volume:
 function MembersPanel({
   members,
   locations,
+  channels,
   currentUser,
   activeServer,
   onKick,
@@ -1026,6 +1021,7 @@ function MembersPanel({
 }: {
   members: Member[];
   locations: Record<string, MemberLocation>;
+  channels: Channel[];
   currentUser: User;
   activeServer: Server | null;
   onKick: (memberID: string) => Promise<void>;
@@ -1037,6 +1033,7 @@ function MembersPanel({
   const pageCount = Math.max(1, Math.ceil(members.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const visibleMembers = members.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const channelNames = useMemo(() => Object.fromEntries(channels.map((channel) => [channel.id, channel.name])), [channels]);
   useEffect(() => setPage((value) => Math.min(value, pageCount)), [pageCount]);
   return (
     <aside className="flex min-h-0 flex-col border-l border-line bg-[#171a21] max-lg:w-full lg:w-[252px]">
@@ -1048,7 +1045,9 @@ function MembersPanel({
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
         {visibleMembers.map((member) => {
           const location = locations[member.id];
-          const locationText = location?.voiceName ? `语音：${location.voiceName}` : location?.textName ? `文字：${location.textName}` : "未进入频道";
+          const voiceName = location?.voiceName || (location?.voiceId ? channelNames[location.voiceId] : "");
+          const textName = location?.textName || (location?.textId ? channelNames[location.textId] : "");
+          const locationText = voiceName ? `语音：${voiceName}` : textName ? `文字：${textName}` : "未进入频道";
           return (
             <div key={member.id} className="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-rail">
               <div className="relative grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#2c3340] text-sm font-bold">{member.username[0]?.toUpperCase()}<span className={cn("absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#171a21]", member.status === "online" ? "bg-mint" : "bg-coral")} /></div>

@@ -14,17 +14,18 @@ import (
 )
 
 type Hub struct {
-	store       *store.Store
-	register    chan *Client
-	unregister  chan *Client
-	broadcast   chan Envelope
-	clients     map[*Client]bool
-	rooms       map[string]map[*Client]bool
-	serverRooms map[string]map[*Client]bool
-	voiceRooms  map[string]map[string]*VoiceMember
-	users       map[string]map[*Client]bool
-	userCounts  map[string]int
-	mu          sync.RWMutex
+	store        *store.Store
+	register     chan *Client
+	unregister   chan *Client
+	broadcast    chan Envelope
+	clients      map[*Client]bool
+	rooms        map[string]map[*Client]bool
+	serverRooms  map[string]map[*Client]bool
+	voiceRooms   map[string]map[string]*VoiceMember
+	voiceServers map[string]string
+	users        map[string]map[*Client]bool
+	userCounts   map[string]int
+	mu           sync.RWMutex
 }
 
 type VoiceMember struct {
@@ -45,11 +46,9 @@ type Client struct {
 }
 
 type MemberLocation struct {
-	UserID    string `json:"userId"`
-	TextID    string `json:"textId,omitempty"`
-	VoiceID   string `json:"voiceId,omitempty"`
-	TextName  string `json:"textName,omitempty"`
-	VoiceName string `json:"voiceName,omitempty"`
+	UserID  string `json:"userId"`
+	TextID  string `json:"textId,omitempty"`
+	VoiceID string `json:"voiceId,omitempty"`
 }
 
 type Envelope struct {
@@ -68,16 +67,17 @@ var upgrader = websocket.Upgrader{
 
 func NewHub(store *store.Store) *Hub {
 	return &Hub{
-		store:       store,
-		register:    make(chan *Client),
-		unregister:  make(chan *Client),
-		broadcast:   make(chan Envelope, 256),
-		clients:     map[*Client]bool{},
-		rooms:       map[string]map[*Client]bool{},
-		serverRooms: map[string]map[*Client]bool{},
-		voiceRooms:  map[string]map[string]*VoiceMember{},
-		users:       map[string]map[*Client]bool{},
-		userCounts:  map[string]int{},
+		store:        store,
+		register:     make(chan *Client),
+		unregister:   make(chan *Client),
+		broadcast:    make(chan Envelope, 256),
+		clients:      map[*Client]bool{},
+		rooms:        map[string]map[*Client]bool{},
+		serverRooms:  map[string]map[*Client]bool{},
+		voiceRooms:   map[string]map[string]*VoiceMember{},
+		voiceServers: map[string]string{},
+		users:        map[string]map[*Client]bool{},
+		userCounts:   map[string]int{},
 	}
 }
 
@@ -184,34 +184,25 @@ func (h *Hub) voiceCounts(serverID string) map[string]int {
 	if err != nil {
 		return map[string]int{}
 	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	counts := make(map[string]int, len(channels))
 	for _, channel := range channels {
+		h.voiceServers[channel.ID] = serverID
 		counts[channel.ID] = len(h.voiceRooms[channel.ID])
 	}
 	return counts
 }
 
 func (h *Hub) memberLocations(serverID string) []MemberLocation {
-	channels, err := h.store.ListChannelsByServer(context.Background(), serverID)
-	if err != nil {
-		return []MemberLocation{}
-	}
-	names := make(map[string]string, len(channels))
-	for _, channel := range channels {
-		names[channel.ID] = channel.Name
-	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	locations := make([]MemberLocation, 0)
 	for client := range h.serverRooms[serverID] {
 		locations = append(locations, MemberLocation{
-			UserID:    client.userID,
-			TextID:    client.text,
-			VoiceID:   client.voice,
-			TextName:  names[client.text],
-			VoiceName: names[client.voice],
+			UserID:  client.userID,
+			TextID:  client.text,
+			VoiceID: client.voice,
 		})
 	}
 	return locations
@@ -231,20 +222,10 @@ func (h *Hub) publishMemberLocation(client *Client) {
 		return
 	}
 	for _, serverID := range serverIDs {
-		channels, err := h.store.ListChannelsByServer(context.Background(), serverID)
-		if err != nil {
-			continue
-		}
-		names := make(map[string]string, len(channels))
-		for _, channel := range channels {
-			names[channel.ID] = channel.Name
-		}
 		payload, _ := json.Marshal(MemberLocation{
-			UserID:    client.userID,
-			TextID:    textID,
-			VoiceID:   voiceID,
-			TextName:  names[textID],
-			VoiceName: names[voiceID],
+			UserID:  client.userID,
+			TextID:  textID,
+			VoiceID: voiceID,
 		})
 		h.mu.RLock()
 		targets := h.serverRooms[serverID]
@@ -276,13 +257,27 @@ func (h *Hub) publishMemberLocationToServers(serverIDs []string, location Member
 }
 
 func (h *Hub) publishVoiceCount(channelID string) {
-	serverID, err := h.store.FindVoiceChannelServer(context.Background(), channelID)
-	if err != nil {
-		return
+	h.mu.RLock()
+	serverID := h.voiceServers[channelID]
+	h.mu.RUnlock()
+	if serverID == "" {
+		var err error
+		serverID, err = h.store.FindVoiceChannelServer(context.Background(), channelID)
+		if err != nil {
+			return
+		}
+		h.mu.Lock()
+		h.voiceServers[channelID] = serverID
+		h.mu.Unlock()
 	}
-	payload, _ := json.Marshal(map[string]any{"channelId": channelID, "count": h.voiceCount(channelID)})
+	count := h.voiceCount(channelID)
+	payload, _ := json.Marshal(map[string]any{"channelId": channelID, "count": count})
 	h.mu.RLock()
 	targets := h.serverRooms[serverID]
+	if len(targets) == 0 {
+		h.mu.RUnlock()
+		return
+	}
 	for client := range targets {
 		select {
 		case client.send <- Envelope{Type: "voice_count", ChannelID: channelID, ServerID: serverID, Payload: payload}:
@@ -334,11 +329,16 @@ func (h *Hub) leaveVoice(client *Client, channelID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.voiceRooms[channelID], client.userID)
+	delete(h.rooms[channelID], client)
+	delete(client.rooms, channelID)
 	if client.voice == channelID {
 		client.voice = ""
 	}
 	if len(h.voiceRooms[channelID]) == 0 {
 		delete(h.voiceRooms, channelID)
+	}
+	if len(h.rooms[channelID]) == 0 {
+		delete(h.rooms, channelID)
 	}
 }
 
@@ -456,7 +456,7 @@ func (c *Client) readPump() {
 				c.hub.publishMemberLocation(c)
 			}
 		case "voice_join":
-			if c.rooms[msg.ChannelID] {
+			if ok, err := c.hub.store.IsChannelMember(context.Background(), msg.ChannelID, c.userID); err == nil && ok {
 				existing, oldVoice := c.hub.joinVoice(c, msg.ChannelID)
 				if oldVoice != "" {
 					c.hub.Publish(Envelope{Type: "voice_leave", ChannelID: oldVoice, UserID: c.userID, Username: c.username})
@@ -469,14 +469,14 @@ func (c *Client) readPump() {
 				c.hub.publishMemberLocation(c)
 			}
 		case "voice_leave":
-			if c.rooms[msg.ChannelID] {
+			if c.voice == msg.ChannelID {
 				c.hub.leaveVoice(c, msg.ChannelID)
 				c.hub.Publish(msg)
 				c.hub.publishVoiceCount(msg.ChannelID)
 				c.hub.publishMemberLocation(c)
 			}
 		case "voice_signal":
-			if c.rooms[msg.ChannelID] {
+			if c.voice == msg.ChannelID {
 				c.hub.PublishToUser(msg.TargetID, msg)
 			}
 		case "typing":

@@ -330,19 +330,6 @@ func (s *Store) ListChannels(ctx context.Context, serverID, userID string) ([]Ch
 	return pgx.CollectRows(rows, pgx.RowToStructByName[Channel])
 }
 
-func (s *Store) ListChannelsByServer(ctx context.Context, serverID string) ([]Channel, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT id, server_id, name, kind, position, created_at
-		FROM channels
-		WHERE server_id = $1
-		ORDER BY position, created_at
-	`, serverID)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[Channel])
-}
-
 func (s *Store) FindVoiceChannelServer(ctx context.Context, channelID string) (string, error) {
 	var serverID string
 	err := s.db.QueryRow(ctx, `SELECT server_id FROM channels WHERE id = $1 AND kind = 'voice'`, channelID).Scan(&serverID)
